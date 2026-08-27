@@ -1,0 +1,20 @@
+{
+  "name": "davidgaitan/wp-cli-migrate-app",
+  "description": "wp migrate_app <folder_name> — import an uploaded WordPress package into an existing installation, rewrite URLs serialization-safely, and merge themes/plugins/uploads.",
+  "type": "wp-cli-package",
+  "license": "MIT",
+  "keywords": ["wp-cli", "wordpress", "migration", "duplicator"],
+  "require": {
+    "php": ">=7.4",
+    "wp-cli/wp-cli": "^2.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "MigrateApp\\": "src/"
+    },
+    "files": ["migrate-app.php"]
+  },
+  "extra": {
+    "commands": ["migrate_app"]
+  }
+}

@@ -1,0 +1,41 @@
+# --- Migration artefacts -----------------------------------------------------
+# The most important lines in this file. A backup is a full dump of a live
+# WordPress database: users, hashed passwords, order data, API keys stored in
+# options. Committing one — especially to a public repo — is a data breach.
+migrate-app-backup-*.sql
+*.tmp.sql
+*.sql
+
+# A real migration.yaml names live site URLs and server paths. Only the example
+# is tracked; the negation keeps it that way even though it ends in .yaml.
+migration.yaml
+!migration.example.yaml
+
+# An extracted package dropped in here for testing carries the whole source site.
+/dup-installer/
+/my_site_to_migrated/
+
+# --- Composer ----------------------------------------------------------------
+# This is a library (composer type: wp-cli-package), not an application, so the
+# lock file is deliberately not tracked — consumers resolve their own versions.
+/vendor/
+composer.lock
+
+# --- Test scratch ------------------------------------------------------------
+/tests/tmp/
+/tests/output/
+*.log
+
+# --- Editors -----------------------------------------------------------------
+.idea/
+.vscode/
+*.sublime-workspace
+*.swp
+*~
+
+# --- macOS / Windows ---------------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db

@@ -1,0 +1,591 @@
+# wp migrate_app
+
+A WP-CLI command that imports an uploaded WordPress package into an **existing, working** WordPress
+installation — rewriting URLs safely and merging the package's themes, plugins and uploads into the
+site that is already there.
+
+Built for the case Duplicator Lite cannot finish: the package is extracted into the destination's
+webroot, but the paid installer is what would have imported it, and there is no access to the origin
+server to do anything about it. Everything here runs from the destination side.
+
+```bash
+wp migrate_app my_site_to_migrated
+```
+
+---
+
+## Contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [Preparing the package](#preparing-the-package)
+- [Usage — the three-step flow](#usage--the-three-step-flow)
+- [A complete worked run](#a-complete-worked-run)
+- [migration.yaml reference](#migrationyaml-reference)
+- [Flags](#flags)
+- [What it actually does](#what-it-actually-does)
+- [After the migration — check these](#after-the-migration--check-these)
+- [Rollback](#rollback)
+- [Troubleshooting](#troubleshooting)
+- [Things worth knowing](#things-worth-knowing)
+- [Using it without Duplicator](#using-it-without-duplicator)
+- [Development and testing](#development-and-testing)
+
+---
+
+## Requirements
+
+| | |
+|---|---|
+| WordPress | An **already installed and working** single-site install at the destination. Not multisite. |
+| WP-CLI | 2.5+ (developed and tested against 2.12). |
+| PHP | 7.4+ (linted and unit-tested under real 7.4). |
+| Database user | Needs `DROP`, `CREATE`, `INSERT` on the destination schema. |
+| Disk | About 3× the dump size free — the dump, a prefix-rewritten copy, and the backup. |
+| Optional | `rsync` for faster merges. Without it a PHP walk is used, with identical results. |
+
+No Composer install is needed at runtime. WP-CLI is the only dependency.
+
+---
+
+## Install
+
+**As a WP-CLI package** — the command is then available everywhere:
+
+```bash
+wp package install /path/to/wp-cli-migrate-app
+```
+
+**Without installing** — point at the bootstrap directly. Usually the easiest option on a host where
+you just uploaded the folder over SFTP:
+
+```bash
+wp --require=/path/to/wp-cli-migrate-app/migrate-app.php migrate_app my_site_to_migrated
+```
+
+To make that permanent, add it to the site's `wp-cli.yml` in the WordPress root:
+
+```yaml
+require:
+  - wp-cli-migrate-app/migrate-app.php
+```
+
+**As a plugin** — drop the folder into `wp-content/plugins/`. It registers nothing outside WP-CLI, so
+it stays inert for web requests and does not need activating.
+
+Confirm it loaded:
+
+```bash
+wp help migrate_app
+```
+
+---
+
+## Preparing the package
+
+The command expects an **already-extracted** folder sitting in the destination's webroot, beside
+`wp-admin` and `wp-config.php`:
+
+```
+public_html/
+├── wp-admin/
+├── wp-content/          ← the LIVE site's content; will be merged into, never replaced
+├── wp-includes/
+├── wp-config.php        ← never touched
+├── ...
+└── my_site_to_migrated/     ← the uploaded package
+    ├── migration.yaml       ← written for you by --generate-config
+    ├── dup-installer/
+    │   ├── dup-archive__abc1234.txt    (Duplicator's manifest — JSON)
+    │   └── dup-database__abc1234.sql   (the dump)
+    └── wp-content/
+        ├── themes/
+        ├── plugins/
+        └── uploads/
+```
+
+To get there from a Duplicator archive:
+
+```bash
+mkdir -p ~/public_html/my_site_to_migrated
+cd ~/public_html/my_site_to_migrated
+unzip /path/to/20260821_yoursite_abc1234_archive.zip     # or: unzip *.daf
+```
+
+If you only have SFTP, unzip locally and upload the extracted folder.
+
+The folder name is yours to choose — it is the argument you pass to the command.
+
+> **Do not run Duplicator's own `installer.php`.** This command replaces it. Delete
+> `installer-backup.php` and `installer.php` from the webroot if they are there; they are publicly
+> reachable and are a remote-code-execution surface.
+
+---
+
+## Usage — the three-step flow
+
+### 1. Let it write the config
+
+```bash
+wp migrate_app my_site_to_migrated --generate-config
+```
+
+It reads Duplicator's manifest and the dump header, and writes a `migration.yaml` filled in with the
+origin URL, the source table prefix, the database path, and **both the active theme and its parent**
+if the source runs a child theme.
+
+**Read the file it wrote.** Fix anything it guessed wrong. In particular check `target_url`, which
+defaults to this site's current `home_url()`.
+
+### 2. Dry run
+
+```bash
+wp migrate_app my_site_to_migrated --dry-run
+```
+
+Every check runs and every action is reported. Nothing is written — no backup, no dropped tables, no
+copied files. Read the step table before continuing.
+
+### 3. Migrate
+
+```bash
+wp migrate_app my_site_to_migrated
+```
+
+It shows you a summary, warns you what it is about to replace, and asks for confirmation. Add
+`--yes` to skip the prompt in a script.
+
+---
+
+## A complete worked run
+
+```
+$ wp migrate_app my_site_to_migrated --generate-config
+
+Source folder: /home/user/public_html/my_site_to_migrated
+
+# migration.yaml — generated by `wp migrate_app --generate-config`
+# Read every line before running the migration. Paths are relative to this folder.
+# Source: Atrévete a Creer (Duplicator 1.5.16.1, WP 7.1, PHP 8.1.34)
+# table_prefix is the SOURCE prefix; this site's own prefix is left untouched.
+
+origin_url: "https://atreveteacreer.org"
+target_url: "https://new-site.test"
+theme_path:
+  - wp-content/themes/recap
+  - wp-content/themes/recap-child
+plugin_path: wp-content/plugins
+uploads_path: wp-content/uploads
+database: dup-installer/dup-database__dab48ec-21220214.sql
+table_prefix: wp_
+
+Detected theme: recap
+Detected theme: recap-child
+Success: Wrote .../migration.yaml — review it, then run: wp migrate_app my_site_to_migrated --dry-run
+```
+
+```
+$ wp migrate_app my_site_to_migrated --yes
+
+Source folder: /home/user/public_html/my_site_to_migrated
+Config:        /home/user/public_html/my_site_to_migrated/migration.yaml (yaml backend: spyc)
+
+Preflight
+  ✓ database reachable (wptest, prefix `dst_`)
+  ✓ wp-content writable
+  ✓ dump found: dup-database__dab48ec-21220214.sql (2.4 MB)
+  ✓ disk space: 251.4 GB free
+  ✓ collation utf8mb4_unicode_520_ci supported
+  ✓ prefix rewrite queued: `wp_` -> `dst_`
+  ✓ configured source paths exist
+
+setting         value
+source site     Atrévete a Creer
+origin_url      https://atreveteacreer.org
+target_url      https://new-site.test
+database        dup-database__dab48ec-21220214.sql
+source prefix   wp_
+target prefix   dst_
+themes          wp-content/themes/recap, wp-content/themes/recap-child
+plugins         wp-content/plugins
+uploads         wp-content/uploads
+
+Warning: This REPLACES the contents of database `wptest` (tables prefixed `dst_`) ...
+
+Backing up the current database...
+Success: Backup written to /home/user/public_html/migrate-app-backup-20260827-205923.sql
+
+Dropping 12 existing `dst_` tables...
+Rewriting table prefix `wp_` -> `dst_`...
+Importing database...
+Success: Imported 31 tables.
+
+Rewriting URLs...
+Success: Made 50 replacements.
+
+Merging files...
+  + theme: recap (163 files)
+  + theme: recap-child (3 files)
+  + plugin: contact-form-7 (143 files)
+  + uploads (825 files)
+
+step                            result   detail
+backup                          ok       .../migrate-app-backup-20260827-205923.sql (87.6 KB)
+drop tables                     ok       12 dropped
+prefix rewrite                  ok       `wp_` -> `dst_`
+import                          ok       31 tables (mysql < dump)
+assert tables                   ok       31/31
+assert admin                    ok       1 administrator(s)
+search-replace (canonical)      ok       https://atreveteacreer.org  ->  https://new-site.test
+search-replace (json-escaped)   ok       https:\/\/atreveteacreer.org  ->  https:\/\/new-site.test
+search-replace (protocol-rel)   ok       //atreveteacreer.org  ->  //new-site.test
+siteurl/home                    ok       https://new-site.test
+theme: recap                    ok       163 files -> .../wp-content/themes/recap (rsync)
+uploads                         ok       825 files -> .../wp-content/uploads (rsync)
+flush                           ok       rewrite rules + object cache
+verify home                     ok       https://new-site.test
+
+Warning: This site's user table now comes from the source. Log in with a SOURCE account:
+david@poetkods.com
+Warning: The source folder is still in your webroot and is publicly reachable ...
+Rollback if needed: wp db import /home/user/public_html/migrate-app-backup-20260827-205923.sql
+              or: mysql -hlocalhost -uwpuser -p wptest < /home/user/.../migrate-app-backup-...sql
+Success: Migration complete. Visit https://new-site.test
+```
+
+---
+
+## migration.yaml reference
+
+```yaml
+origin_url: https://old-site.com
+target_url: https://new-site.com
+
+theme_path:
+  - wp-content/themes/recap
+  - wp-content/themes/recap-child
+
+plugin_path: wp-content/plugins
+uploads_path: wp-content/uploads
+database: dup-installer/dup-database__abc1234.sql
+table_prefix: wp_
+```
+
+| key | required | meaning |
+|---|---|---|
+| `origin_url` | yes\* | URL the source site lived at. Read from the dump's `siteurl` row if omitted. |
+| `target_url` | yes\* | URL it lives at now. Defaults to this site's `home_url()`. |
+| `theme_path` | no | A theme directory, or a **list** of them. Point at a container (`wp-content/themes`) to merge every theme inside it. |
+| `plugin_path` | no | A plugin directory, a list, or a container. |
+| `uploads_path` | no | Media library directory. Merged into `wp_upload_dir()['basedir']`. |
+| `database` | yes\* | The `.sql` dump. Globbed out of `dup-installer/` if omitted. |
+| `table_prefix` | no | The **source** prefix. Read from the manifest, or the dump's first `CREATE TABLE`. This site's own prefix is never changed. |
+
+\* required, but auto-detected for a Duplicator package.
+
+**Paths** are relative to the package folder; absolute paths are used as-is.
+
+**Child themes:** if the source runs one, list the parent too. `--generate-config` detects this from
+the dump's `template` and `stylesheet` options and writes both. A child theme without its parent
+renders the site unstyled.
+
+**Single vs container:** a directory containing `style.css` is one theme; a directory containing a
+`Plugin Name:` header and no plugin subdirectories is one plugin. Anything else is treated as a
+container and each child is merged individually — which is what leaves the destination's own themes
+and plugins alone.
+
+---
+
+## Flags
+
+| flag | effect |
+|---|---|
+| `--generate-config` | Write `migration.yaml` from the package and exit. |
+| `--dry-run` | Report everything, write nothing. |
+| `--yes` | Skip the confirmation prompt. |
+| `--config=<path>` | Use a config somewhere other than `<folder>/migration.yaml`. |
+| `--skip-db` | Files only. |
+| `--skip-files` | Database only. |
+| `--skip-backup` | Do not export a backup first. Strongly discouraged. |
+| `--backup-dir=<path>` | Where the backup goes. Defaults to the WordPress root. |
+| `--cleanup` | Delete the source folder on success. |
+
+---
+
+## What it actually does
+
+1. **Preflight** — refuses multisite; checks the DB answers, `wp-content` is writable, the dump
+   exists, there is 3× the dump size free on disk, and **the server knows the collation the dump
+   declares**. That last one matters: discovering an unsupported collation *after* the tables are
+   dropped leaves a blank site.
+2. **Backup** — `wp db export` before the first destructive write. If the export produces nothing,
+   the migration stops rather than continuing without an undo.
+3. **Drop** — only the tables carrying *this site's* prefix. `wp db reset` is never used, because it
+   drops every table in the schema, including a co-tenant's.
+4. **Prefix reconcile** — if the source prefix differs, the **dump** is rewritten, not
+   `wp-config.php`. The rewrite is anchored to SQL statement keywords (`CREATE TABLE`, `INSERT INTO`,
+   `ALTER TABLE`, …) so a post containing `` `wp_options` `` in a code sample is not mangled. It also
+   rewrites the prefix-bearing *values* `{prefix}user_roles`, `{prefix}capabilities` and
+   `{prefix}user_level` — miss those and every user loses their role.
+5. **Import** — delegated to `wp db import`, so a large dump streams through `mysql` instead of being
+   read into PHP memory. If that fails it retries by piping the dump in on stdin (see
+   [MySQL client 9x](#mysql-client-9x-import-fails-with-error-1064-near-source)).
+6. **Assert** — compares imported table count against the dump's own `CREATE TABLE` count, and checks
+   `{prefix}user_roles` exists and at least one administrator survived. A partial import that reported
+   success is caught here.
+7. **URL rewrite** — three passes, each in its own process:
+   - `wp search-replace --precise --recurse-objects` for the canonical form, which walks PHP
+     serialization correctly (a `sed` over the `.sql` cannot);
+   - the JSON-escaped form `https:\/\/host`, which block and page-builder content stores;
+   - the protocol-relative form `//host` that themes emit for assets.
+
+   Then `siteurl` and `home` are asserted directly.
+8. **Merge** — themes, plugins and uploads copied in additively. Files the package ships overwrite
+   their counterparts; **anything the destination has that the package does not mention survives.**
+   `rsync -aI` when available, a PHP walk otherwise.
+9. **Finish** — flush the object cache and rewrite rules, print the per-step table.
+
+---
+
+## After the migration — check these
+
+```bash
+# The site answers and the URL is right.
+wp option get home --skip-plugins --skip-themes
+curl -sI https://your-new-site.com | head -1
+
+# Serialized data survived (should print 0).
+wp eval 'global $wpdb; $bad=0;
+foreach($wpdb->get_results("SELECT option_value FROM {$wpdb->options}") as $r){
+  if(!preg_match("/^[aOs]:\d+:/",$r->option_value)) continue;
+  if(@unserialize($r->option_value)===false && $r->option_value!=="b:0;") $bad++;
+} echo $bad;' --skip-plugins --skip-themes
+
+# You can still get in.
+wp user list --fields=user_login,roles --skip-plugins --skip-themes
+
+# The active theme resolves, parent included.
+wp theme list --skip-plugins --skip-themes
+
+# Every active plugin actually exists on disk.
+wp plugin list --status=active --skip-plugins --skip-themes
+```
+
+Then, in a browser: load the front page, load a single post (proves permalinks), load `/wp-admin`,
+and open one image from the media library.
+
+Finally, **delete the source folder** — `--cleanup`, or by hand.
+
+---
+
+## Rollback
+
+Every failure after the backup exists prints both forms, because on some hosts only the second works:
+
+```bash
+wp db import /path/to/public_html/migrate-app-backup-20260827-205923.sql
+# or
+mysql -hlocalhost -uwpuser -p yourdb < /path/to/public_html/migrate-app-backup-20260827-205923.sql
+```
+
+Files are merged additively and are never deleted, so a rollback of the database returns the site to
+its previous state; migrated theme and plugin directories simply remain on disk, inactive.
+
+---
+
+## Troubleshooting
+
+### MySQL client 9x import fails with ERROR 1064 near SOURCE
+
+`wp db import` runs `mysql --execute="SOURCE <file>"`, and MySQL client 9.x removed `SOURCE` from
+`--execute`. This affects *any* dump, not just yours. `migrate_app` detects it and retries with a
+stdin pipe. The step table tells you which path ran:
+
+```
+import   ok   31 tables (mysql < dump)
+```
+
+The same limitation applies to restoring a backup, which is why the rollback hint prints both forms.
+
+### `Folder not found`
+
+The argument is a folder name relative to the WordPress root, not a path relative to your shell's
+current directory. Run `wp eval 'echo ABSPATH;'` to see where it is looking.
+
+### `This server does not support the collation the dump declares`
+
+Raised at preflight, **before** anything is dropped. The destination MySQL/MariaDB is older than the
+source. Either upgrade it, or convert the dump:
+
+```bash
+sed -i 's/utf8mb4_unicode_520_ci/utf8mb4_unicode_ci/g; s/utf8mb4_0900_ai_ci/utf8mb4_unicode_ci/g' \
+  my_site_to_migrated/dup-installer/dup-database__*.sql
+```
+
+### `The dump declares N tables but only M imported`
+
+Some tables were rejected while the client still returned success. Usual causes: a `DEFINER=` clause
+on a dumped view or trigger that your DB user cannot assume, an index too long for an older server,
+or a per-table collation. Find the gap:
+
+```bash
+grep -oE 'CREATE TABLE `[^`]+`' my_site_to_migrated/dup-installer/dup-database__*.sql | sort > /tmp/want
+wp db query "SHOW TABLES;" --skip-column-names | sort > /tmp/have
+```
+
+For `DEFINER`, strip it and re-run:
+
+```bash
+sed -i 's/DEFINER=[^ ]* //g' my_site_to_migrated/dup-installer/dup-database__*.sql
+```
+
+### `Permalinks were not flushed: loading the migrated plugins produced a fatal error`
+
+The migration succeeded. One of the migrated plugins does not run on this host — that step is the
+first moment migrated code actually executes. The warning names the file and line. Then:
+
+```bash
+wp plugin list --status=active --skip-plugins --skip-themes
+wp plugin deactivate <slug> --skip-plugins --skip-themes
+wp rewrite flush --hard
+```
+
+### The site white-screens after migrating
+
+Almost always a drop-in pointing at a service that is not there. Rename and retry:
+
+```bash
+mv wp-content/object-cache.php   wp-content/object-cache.php.off
+mv wp-content/advanced-cache.php wp-content/advanced-cache.php.off
+```
+
+If that is not it, `define( 'WP_DEBUG', true );` plus `define( 'WP_DEBUG_LOG', true );` and read
+`wp-content/debug.log`.
+
+### Posts 404 but the homepage works
+
+Rewrite rules. `wp rewrite flush --hard`, and confirm the destination has a writable `.htaccess`
+(Apache) or the correct `try_files` block (nginx).
+
+### Images 404 / media library is empty
+
+Check `uploads_path` actually pointed somewhere, and that the destination's upload base matches:
+
+```bash
+wp option get upload_path --skip-plugins --skip-themes   # should usually be empty
+wp eval 'print_r( wp_upload_dir() );' --skip-plugins --skip-themes
+```
+
+An `upload_path` inherited from the source pointing at the origin's absolute path is the usual cause
+— clear it with `wp option update upload_path ''`.
+
+### I cannot log in
+
+The user table came from the source site. Use a source account — the command prints the ones it found.
+Otherwise:
+
+```bash
+wp user create newadmin you@example.com --role=administrator --skip-plugins --skip-themes
+```
+
+### Out of memory during the run
+
+WP-CLI ships as a phar with a `#!/usr/bin/env php` shebang, so `WP_CLI_PHP_ARGS` is ignored. Raise
+the limit by invoking PHP directly:
+
+```bash
+php -d memory_limit=512M "$(command -v wp)" migrate_app my_site_to_migrated
+```
+
+### Some of the old domain is still in the database
+
+Expected in three cases, all correct: the `guid` column, bare-domain occurrences with no scheme (an
+email address at that domain), and filenames that happen to contain the domain. See below.
+
+---
+
+## Things worth knowing
+
+**Your login changes.** The dump includes the source's `users` table. After the import the
+destination's own accounts are gone. The command prints the source admin logins it found.
+
+**`guid` is deliberately not rewritten.** WordPress uses it as a permanent identifier for feed
+readers, not as a URL. Changing it makes every subscriber re-download every post as new.
+
+**The bare domain is deliberately not rewritten.** Replacing `old-site.com` without a scheme would
+also rewrite `admin@old-site.com` and DNS strings in the options table. Only `https://old-site.com`,
+`https:\/\/old-site.com` and `//old-site.com` are touched.
+
+**Delete the source folder when you are done.** It contains `dup-installer/`, which is reachable over
+HTTP and is a remote-code-execution surface on a live site. `--cleanup` handles it.
+
+**Drop-ins.** If `wp-content/object-cache.php`, `advanced-cache.php` or `db.php` exist on the
+destination, they belong to a plugin configured against the *old* database. On shared
+Redis/Memcached with a non-unique key prefix, a surviving `object-cache.php` can also serve another
+site's cached data.
+
+**A merge is a union, not a replacement.** That is the point, and it has a consequence: if the same
+plugin exists on both sides at *different versions*, you get the union of two file trees — files
+deleted or renamed between those versions survive and can still be autoloaded. If a plugin misbehaves
+in a way that makes no sense after migrating, delete its directory and reinstall it. The command
+never removes anything, so this is always your call.
+
+**The origin's filesystem path.** Cache plugins and `upload_path` store absolute server paths, which
+no URL replacement reaches. After a run the command counts how many option rows still contain the
+origin's path and hands you a `--dry-run` search-replace to inspect. It does not rewrite paths
+automatically: a scheme-qualified URL is unambiguous, an absolute path is not.
+
+**Salts are not migrated.** The destination keeps its own `AUTH_KEY` and friends. A plugin that
+encrypted an API key against the *source* salts cannot decrypt it here, and usually fails silently.
+Re-enter third-party credentials after migrating.
+
+**Multisite is not supported.** The command refuses rather than half-migrating.
+
+---
+
+## Using it without Duplicator
+
+Nothing requires a Duplicator package. Any folder containing a `.sql` dump and some `wp-content`
+directories works — you just write `migration.yaml` by hand instead of generating it, because there
+is no manifest to read:
+
+```yaml
+origin_url: https://old-site.com
+target_url: https://new-site.com
+theme_path: wp-content/themes/mytheme
+plugin_path: wp-content/plugins
+uploads_path: wp-content/uploads
+database: backup.sql
+table_prefix: wp_
+```
+
+`table_prefix` is still auto-detected from the dump's first `CREATE TABLE` if you leave it out.
+
+---
+
+## Development and testing
+
+```bash
+# Unit — no database, no WordPress, no setup at all.
+php tests/probe.php
+
+# Unit + Duplicator introspection against a real package.
+PKG=/path/to/extracted/package php tests/probe.php
+
+# End-to-end — throwaway MySQL container + scratch WordPress install, a real
+# migration, assertions, then full teardown. Touches nothing you own. The
+# destination prefix is dst_ on purpose, so every run exercises the prefix rewrite.
+./tests/e2e.sh /path/to/extracted/package
+
+# PHP 7.4 compatibility.
+docker run --rm -v "$PWD":/app -w /app php:7.4-cli sh -c 'for f in migrate-app.php src/*.php; do php -l "$f"; done'
+```
+
+`ISA.md` holds the full criteria list, the decision log, and the evidence behind every claim in this
+README. `CLAUDE.md` holds the invariants for anyone — human or agent — changing the code.
+
+---
+
+## License
+
+MIT

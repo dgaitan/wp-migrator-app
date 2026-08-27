@@ -1,0 +1,43 @@
+# migration.yaml
+#
+# Lives inside the folder you uploaded to the site root, next to wp-content/.
+# All relative paths resolve against that folder; absolute paths are used as-is.
+#
+# You do not have to write this by hand — run:
+#     wp migrate_app my_site_to_migrated --generate-config
+# and it will read the Duplicator manifest and fill in everything it can.
+
+# The URL the source site used to live at. Found in the dump's `siteurl` option.
+origin_url: https://old-site.com
+
+# Where it lives now. Usually this site's own home URL.
+target_url: https://new-site.com
+
+# The theme(s) to bring across.
+#
+# Give a single path for one theme, or a list. If the source runs a CHILD theme,
+# list the parent too — otherwise the site renders unstyled. `--generate-config`
+# detects this from the dump's `template` and `stylesheet` options.
+#
+# Pointing at wp-content/themes (the container) merges every theme inside it,
+# leaving this site's own themes alone.
+theme_path:
+  - wp-content/themes/recap
+  - wp-content/themes/recap-child
+
+# The plugin(s). A container directory merges each plugin inside it; a single
+# plugin directory (one containing a file with a `Plugin Name:` header) is
+# copied as one plugin.
+plugin_path: wp-content/plugins
+
+# The media library. Merged into this site's uploads dir (wp_upload_dir()).
+uploads_path: wp-content/uploads
+
+# The SQL dump. For a Duplicator package this is under dup-installer/.
+database: dup-installer/dup-database__abc1234-21220214.sql
+
+# OPTIONAL — the SOURCE site's table prefix.
+# Leave it out and it is read from the Duplicator manifest, or from the first
+# CREATE TABLE in the dump. This site's own prefix is never modified; the dump
+# is rewritten to match it.
+table_prefix: wp_
