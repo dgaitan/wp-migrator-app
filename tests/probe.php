@@ -102,16 +102,14 @@ if ( ! $pkg || ! is_dir( $pkg ) ) {
 	$themes = $dup->detect_themes( $db );
 	check( 'active theme detected', (bool) $themes['stylesheet'], true );
 
-	// Value assertions — only for the reference package this tool was built against.
-	if ( 'dup-database__dab48ec-21220214.sql' === basename( (string) $db ) ) {
-		echo "  (reference package detected — asserting exact values)\n";
-		check( 'ref: origin_url', $dup->detect_origin_url( $db ), 'https://atreveteacreer.org' );
-		check( 'ref: prefix', $dup->detect_prefix( $db ), 'wp_' );
-		check( 'ref: collation', $dup->detect_collation( $db ), 'utf8mb4_unicode_520_ci' );
-		check( 'ref: admin users', $dup->admin_users(), array( 'david@poetkods.com' ) );
-		check( 'ref: parent theme (template)', $themes['template'], 'recap' );
-		check( 'ref: child theme (stylesheet)', $themes['stylesheet'], 'recap-child' );
-	}
+	// Deliberately no hardcoded expected values here. Asserting that a specific
+	// package yields a specific domain, admin address or theme slug would bake
+	// someone's real site into a public test suite, and it would only ever pass
+	// on one machine. The shape assertions above cover the same code paths for
+	// any package you point PKG at.
+	echo "  detected: {$themes['stylesheet']}"
+		. ( $themes['template'] && $themes['template'] !== $themes['stylesheet'] ? " (child of {$themes['template']})" : '' )
+		. ', prefix ' . $dup->detect_prefix( $db ) . "\n";
 
 	echo "\n== ISC-20: generated yaml round-trips through the loader ==\n";
 	$data   = array(

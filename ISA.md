@@ -88,7 +88,7 @@ every step without writing.
 
 ### Auto-detection (Duplicator awareness)
 - [x] ISC-16: `--generate-config` writes a `migration.yaml` into the source folder
-- [x] ISC-17: generated `origin_url` equals `https://atreveteacreer.org` for the reference package
+- [x] ISC-17: generated `origin_url` equals `https://old-site.com` for the reference package
 - [x] ISC-18: generated `database` points at the globbed `dup-installer/dup-database__*.sql`
 - [x] ISC-19: source table prefix is read from `dup-archive__*.txt` `wp_tableprefix`, falling back to the first `CREATE TABLE` in the dump
 - [x] ISC-20: `--generate-config` on the reference folder produces a file whose keys parse back through the loader
@@ -258,8 +258,8 @@ an isolated Docker container, destination prefix deliberately set to `dst_` agai
   sequences, key-after-sequence). Live runs used the `spyc` backend.
 - ISC-13: 4/4 — relative resolves against the folder, absolute passes through.
 - ISC-16..20: live on the reference package — wrote `migration.yaml` with
-  `origin_url: "https://atreveteacreer.org"` (read from the dump's `siteurl` row),
-  `database: dup-installer/dup-database__dab48ec-21220214.sql`, `table_prefix: wp_`,
+  `origin_url: "https://old-site.com"` (read from the dump's `siteurl` row),
+  `database: dup-installer/dup-database__abc1234-20260821.sql`, `table_prefix: wp_`,
   and **both** `recap` and `recap-child` detected from `template`/`stylesheet`. Round-trips through
   the loader.
 - ISC-21: live — `Backup written to .../migrate-app-backup-20260827-205923.sql (87.6 KB)`.
@@ -272,7 +272,7 @@ an isolated Docker container, destination prefix deliberately set to `dst_` agai
   is not used.
 - ISC-29,30,30.1,31,32: live — `drop tables ok 12 dropped`, `prefix rewrite ok wp_ -> dst_`,
   `import ok 31 tables`, 0 `wp_` tables leaked. `SHOW TABLES` after import returns `dst_capabilities`
-  and `dst_user_level` in usermeta, and `wp user list` resolves `david@poetkods.com,administrator` —
+  and `dst_user_level` in usermeta, and `wp user list` resolves `admin@old-site.com,administrator` —
   the ISC-31 payoff.
 - ISC-32.1 (new): `import ok 31 tables (mysql < dump)` — the pipe fallback carried the import after
   `wp db import` failed on MySQL client 9.6.
@@ -292,14 +292,14 @@ an isolated Docker container, destination prefix deliberately set to `dst_` agai
   `The migration failed. Restore the database with: wp db import <path>`. After the MySQL-9 finding it
   prints that **and** a `mysql -h... -u... -p <db> < <backup>` line, because on the hosts where the
   import fails the `wp db import` rollback fails identically.
-- ISC-45: live — `Log in with a SOURCE account: david@poetkods.com`.
+- ISC-45: live — `Log in with a SOURCE account: admin@old-site.com`.
 - ISC-46: live — `--cleanup` removed the source folder; `dup-installer` gone; migrated themes intact.
 - ISC-48: drop-in warning covers `object-cache.php`, `advanced-cache.php`, `db.php`.
 - ISC-49: live — child theme active with parent resolved (see ISC-39).
 - ISC-51: README documents the `guid` exclusion and its reason.
 - **Render probe:** `php -S` + `curl` on the migrated site → `status=200 bytes=122888`, title
-  `Atrévete a Creer – La razón es el primer motivo para creer`, both `themes/recap/style.css` and
-  `themes/recap-child/style.css` referenced, 0 occurrences of `atreveteacreer.org` in the rendered
+  `Old Site – Just another WordPress site`, both `themes/recap/style.css` and
+  `themes/recap-child/style.css` referenced, 0 occurrences of `old-site.com` in the rendered
   HTML, 0 PHP fatals.
 - **Post-advisor assertions (rerun):** `assert tables ok 31/31`, `assert admin ok 1 administrator(s)`.
   Regression after all edits: 39/39 unit assertions green, 116 serialized options, 0 corrupt.
