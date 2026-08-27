@@ -129,6 +129,20 @@ if ( ! $pkg || ! is_dir( $pkg ) ) {
 	check( 'round-trip prefix', $back['table_prefix'], $data['table_prefix'] );
 }
 
+echo "\n== backup plausibility: a truncated dump must not pass ==\n";
+$bk = sys_get_temp_dir() . '/migrate-app-backup-probe-' . getmypid();
+@mkdir( $bk, 0777, true );
+file_put_contents( $bk . '/empty.sql', '' );
+file_put_contents( $bk . '/tiny.sql', "-- MySQL dump\n" );
+file_put_contents( $bk . '/real.sql', "-- MySQL dump 10.13\n" . str_repeat( "-- padding\n", 200 ) . "CREATE TABLE `wp_options` (id int);\n" );
+file_put_contents( $bk . '/html.sql', str_repeat( "<html>not a dump</html>\n", 200 ) );
+check( 'empty file rejected', Fs::looks_like_sql_dump( $bk . '/empty.sql' ), false );
+check( 'truncated file rejected', Fs::looks_like_sql_dump( $bk . '/tiny.sql' ), false );
+check( 'wrong content rejected', Fs::looks_like_sql_dump( $bk . '/html.sql' ), false );
+check( 'real dump accepted', Fs::looks_like_sql_dump( $bk . '/real.sql' ), true );
+check( 'missing file rejected', Fs::looks_like_sql_dump( $bk . '/nope.sql' ), false );
+Fs::rmdir_recursive( $bk );
+
 echo "\n== ISC-39: merge is ADDITIVE ==\n";
 $tmp = sys_get_temp_dir() . '/migrate-app-probe-' . getmypid();
 @mkdir( $tmp . '/src/recap', 0777, true );

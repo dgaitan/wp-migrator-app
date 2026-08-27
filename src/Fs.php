@@ -343,6 +343,39 @@ class Fs {
 	 * @param string $path Directory.
 	 * @return bool
 	 */
+	/**
+	 * Whether a file plausibly is a SQL dump.
+	 *
+	 * Used to check a database backup before anything destructive runs. A
+	 * truncated backup is worse than no backup: it manufactures confidence at
+	 * exactly the moment confidence is expensive.
+	 *
+	 * @param string $path File path.
+	 * @return bool
+	 */
+	public static function looks_like_sql_dump( $path ) {
+		if ( ! is_file( $path ) || filesize( $path ) < 1024 ) {
+			return false;
+		}
+
+		$handle = fopen( $path, 'r' );
+
+		if ( ! $handle ) {
+			return false;
+		}
+
+		$head = (string) fread( $handle, 8192 );
+		fclose( $handle );
+
+		foreach ( array( 'CREATE TABLE', 'DROP TABLE', 'MySQL dump', 'MariaDB dump' ) as $marker ) {
+			if ( false !== stripos( $head, $marker ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	public static function rmdir_recursive( $path ) {
 		if ( ! is_dir( $path ) ) {
 			return false;

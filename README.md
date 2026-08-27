@@ -1,33 +1,64 @@
 # wp migrate_app
 
-A WP-CLI command that imports an uploaded WordPress package into an **existing, working** WordPress
-installation — rewriting URLs safely and merging the package's themes, plugins and uploads into the
-site that is already there.
+Import a WordPress package into an **existing, working** WordPress installation — rewriting URLs
+safely and merging the package's themes, plugins and uploads into the site that is already there.
 
-Built for the case Duplicator Lite cannot finish: the package is extracted into the destination's
-webroot, but the paid installer is what would have imported it, and there is no access to the origin
-server to do anything about it. Everything here runs from the destination side.
+Built for the case Duplicator Lite cannot finish: you have the package, but the paid installer is
+what would have imported it, and there is no access to the origin server to do anything about it.
+Everything here runs from the destination side.
+
+Two commands. They do the same migration; they differ only in where you type it.
 
 ```bash
+# You are ON the destination server, package already uploaded.
 wp migrate_app my_site_to_migrated
+
+# You are on your own machine. It uploads the package and migrates over SSH.
+wp migrate_app_remote ./my_site_to_migrated --to=@prod
 ```
+
+### Which one do you want?
+
+|  | `migrate_app` | `migrate_app_remote` |
+|---|---|---|
+| You run it | on the destination server | on your laptop |
+| Needs WordPress where you type it | yes | **no** |
+| Gets the package there | you do, by SFTP or File Manager | it does, over rsync |
+| Package ends up | in the webroot, publicly reachable until you delete it | outside the webroot, never web-reachable |
+| Backup ends up | on the destination server | **on your machine**, before the import starts |
+| Needs SSH | no | yes, key-based |
+
+If you can SSH to the destination, prefer `migrate_app_remote` — it is fewer manual steps and it
+never leaves a copy of your database sitting under a live webroot. Everything below covers
+`migrate_app` first because the remote command runs it for you; the differences are in
+[Running it against a remote server](#running-it-against-a-remote-server).
 
 ---
 
 ## Contents
 
+**Start here**
 - [Requirements](#requirements)
 - [Install](#install)
 - [Preparing the package](#preparing-the-package)
+
+**Running it**
 - [Usage — the three-step flow](#usage--the-three-step-flow)
 - [A complete worked run](#a-complete-worked-run)
+- [Running it against a remote server](#running-it-against-a-remote-server) — from your own machine, over SSH
+
+**Reference**
 - [migration.yaml reference](#migrationyaml-reference)
 - [Flags](#flags)
 - [What it actually does](#what-it-actually-does)
+
+**When it is done, or when it goes wrong**
 - [After the migration — check these](#after-the-migration--check-these)
 - [Rollback](#rollback)
 - [Troubleshooting](#troubleshooting)
 - [Things worth knowing](#things-worth-knowing)
+
+**Other**
 - [Using it without Duplicator](#using-it-without-duplicator)
 - [Development and testing](#development-and-testing)
 
@@ -43,6 +74,7 @@ wp migrate_app my_site_to_migrated
 | Database user | Needs `DROP`, `CREATE`, `INSERT` on the destination schema. |
 | Disk | About 3× the dump size free — the dump, a prefix-rewritten copy, and the backup. |
 | Optional | `rsync` for faster merges. Without it a PHP walk is used, with identical results. |
+| Remote mode | See [Running it against a remote server](#running-it-against-a-remote-server). Your machine needs WP-CLI and SSH; it does **not** need WordPress. |
 
 No Composer install is needed at runtime. WP-CLI is the only dependency.
 
@@ -123,6 +155,9 @@ The folder name is yours to choose — it is the argument you pass to the comman
 ---
 
 ## Usage — the three-step flow
+
+> Running this from your own machine instead? Everything below still happens — it just happens over
+> SSH. Skip to [Running it against a remote server](#running-it-against-a-remote-server).
 
 ### 1. Let it write the config
 
@@ -252,6 +287,335 @@ Rollback if needed: wp db import /home/user/public_html/migrate-app-backup-20260
               or: mysql -hlocalhost -uwpuser -p wptest < /home/user/.../migrate-app-backup-...sql
 Success: Migration complete. Visit https://new-site.test
 ```
+
+---
+
+## Running it against a remote server
+
+Everything above assumes you are sitting on the destination server. You do not have to be.
+
+`wp migrate_app_remote` runs on **your own machine**. It checks the far end can do the job, uploads
+the package to a directory outside the remote's webroot, brings a verified database backup home
+*before* anything destructive happens, and then runs the same `wp migrate_app` over there. The
+migration itself is byte-identical to a local run — same sequencer, same prefix reconciliation, same
+serialization-safe replacement.
+
+It is also the safer way to do this. Uploading by hand puts `dup-installer/dup-database__*.sql`
+inside your webroot, where anyone who guesses the folder name can download your whole database over
+HTTP. Remote mode stages it in `$HOME/.migrate-app`, where the web server cannot serve it at all.
+
+### Setup, once
+
+```bash
+# 1. Make the command available on your machine.
+wp package install /path/to/wp-cli-migrate-app
+
+# 2. Make sure SSH works on its own. Fix it here, not mid-migration.
+ssh deploy@example.com          # accept the host key if asked
+ssh-copy-id deploy@example.com  # only if it asked for a password
+```
+
+Then name the destination once, in `~/.wp-cli/config.yml`:
+
+```yaml
+@prod:
+  ssh: deploy@example.com:22/home/deploy/public_html
+  key: ~/.ssh/id_ed25519
+```
+
+That is a standard WP-CLI alias, so `wp @prod plugin list` and friends start working too.
+
+### Then, every migration
+
+```bash
+cd ~/packages   # wherever your extracted package folder is
+
+# 1. Look before you leap. Transfers nothing, changes nothing.
+wp migrate_app_remote ./my_site_to_migrated --to=@prod --dry-run
+
+# 2. Upload. Safe to interrupt and repeat — rsync resumes where it stopped.
+wp migrate_app_remote ./my_site_to_migrated --to=@prod --push-only
+
+# 3. Migrate what you uploaded.
+wp migrate_app_remote ./my_site_to_migrated --to=@prod --skip-push
+
+# 4. Get the source database dump off the server.
+wp migrate_app_remote ./my_site_to_migrated --to=@prod --cleanup-only
+```
+
+Steps 2 and 3 collapse into one command if you drop both flags. Split them for anything large: a
+multi-gigabyte uploads directory is hours of transfer, and a dropped upload should not also mean
+re-running the decision to migrate.
+
+Step 4 is not optional housekeeping. Until you run it, a full copy of the source database is sitting
+on the server.
+
+### What the run shows you
+
+A dry run, and the same summary a real run opens with:
+
+```
+Local package: /Users/you/packages/my_site_to_migrated
+Remote target: ssh:deploy@example.com:22/home/deploy/public_html
+
+Checking the remote...
++--------------+----+-------------------------------------+
+| step         | ok | detail                              |
++--------------+----+-------------------------------------+
+| wordpress    | ok | /home/deploy/public_html            |
+| wp-cli       | ok | WP-CLI 2.12.0                       |
+| php          | ok | 8.1.34                              |
+| open_basedir | ok | unrestricted                        |
+| transfer     | ok | rsync (resumable)                   |
+| disk         | ok | 41.2 GB free, 185.2 MB to send      |
++--------------+----+-------------------------------------+
+
+This will overwrite the database and wp-content of:
+    host      deploy@example.com
+    path      /home/deploy/public_html
+    home URL  https://new-site.com
+    database  84.1 MB
+    from      /Users/you/packages/my_site_to_migrated (185.2 MB)
+```
+
+The prompt names the *resolved* host, path and home URL rather than the alias, because a mistyped
+alias is exactly what it is there to catch.
+
+---
+
+Everything from here down is reference — read it when something needs it.
+
+### What you need
+
+| On your machine | On the remote |
+|---|---|
+| WP-CLI 2.5+ and PHP — **no WordPress required** | WordPress, installed and working |
+| `rsync` (optional but strongly recommended) | WP-CLI on `PATH`, or a phar you point at |
+| SSH access via key or `ssh-agent` | PHP 7.4+, `rsync` if you want resumable uploads |
+
+SSH keys and `ssh-agent` only — there is no password field anywhere, by design. If you normally type
+a password, run `ssh-copy-id user@host` once first. Host key checking is never disabled: if the key
+is unknown, `ssh user@host` on its own once and accept it.
+
+This command has to load before WordPress does, so dropping the tool into `wp-content/plugins` will
+not register it. `wp package install` (as in the setup above) or an explicit
+`wp --require=/path/to/wp-cli-migrate-app/migrate-app.php migrate_app_remote ...` are the two routes
+that work.
+
+### Naming the target
+
+`--to=` takes either an alias, as in the setup above, or a connection string in the same grammar
+WP-CLI's own `--ssh` accepts:
+
+```
+[<scheme>:][<user>@]<host>[:<port>][<path>]
+```
+
+```bash
+--to=@prod
+--to=deploy@example.com:22/home/deploy/public_html
+--to=deploy@example.com --remote-path=/home/deploy/public_html
+```
+
+An alias is the better habit: it keeps the key path and any ProxyJump in one place, and it is the
+only form that survives being typed at 2am. Group aliases (`@all: [@one, @two]`) are refused —
+fanning a destructive migration across several sites from one flag is not a feature.
+
+### The backup is taken before anything else, and brought to you
+
+The remote database is dumped, pulled to your machine, and checked that it is a real SQL dump — all
+**before** the import starts. Only then does the migration run.
+
+The ordering is the point. A backup that lives only on the machine you are about to overwrite is not
+an undo: if something goes wrong, that is precisely the machine you cannot reach. So it comes home
+first, and the remote run is told `--skip-backup` so the database is only dumped once.
+
+You will see the remote run print *"You ran with --skip-backup. There is no way back from here."*
+Ignore it. That is this command telling the far end not to dump twice, and the summary says so.
+
+The file lands in your working directory (or `--backup-dir=<path>`), named for the host and the time:
+
+```
+migrate-app-backup-example.com-20260827-231038.sql
+```
+
+To roll back:
+
+```bash
+wp --ssh=@prod db import /home/deploy/.migrate-app/migrate-app-backup-....sql
+# or, if the remote copy is gone, push yours back up first
+```
+
+### Remote flags
+
+Everything from the [Flags](#flags) table still applies to the migration itself and is passed
+through. These are the ones remote mode adds:
+
+| flag | effect |
+|---|---|
+| `--to=<target>` | **Required.** Alias (`@prod`) or connection string. |
+| `--remote-path=<path>` | WordPress root on the remote, if not in the connection string. |
+| `--identity=<file>` | SSH key. Defaults to `ssh-agent` / `~/.ssh/config`. |
+| `--proxyjump=<spec>` | Passed to ssh as `-J`. |
+| `--staging=<path>` | Where to upload. Defaults to `$HOME/.migrate-app` on the remote. |
+| `--wp-binary=<command>` | How to run WP-CLI on the remote when plain `wp` is not on its `PATH`. |
+| `--push-only` | Upload and stop. Nothing on the remote is modified. |
+| `--skip-push` | Already uploaded. Run the migration. |
+| `--cleanup-only` | Delete the staging directory and stop. |
+| `--force-unlock` | Take over a lock left by an interrupted run. Check nothing is still importing. |
+| `--backup-dir=<path>` | Where the pulled backup goes on **your** machine. |
+
+One environment variable, for hosts that need something ssh_config cannot express:
+
+```bash
+MIGRATE_APP_SSH_OPTS="-o PubkeyAcceptedKeyTypes=+ssh-rsa" wp migrate_app_remote ...
+```
+
+It is appended to every `ssh` and `rsync` invocation this command makes. It is not a way to turn
+`StrictHostKeyChecking` off, and it does not reach the migration itself — WP-CLI builds its own ssh
+flags for that leg and accepts no overrides.
+
+### Shared hosts
+
+Two things go wrong on cPanel-class hosting, and both are checked before anything moves.
+
+**Two migrations at once.** Once a run starts, a lock file sits in the staging directory. If a
+connection drops, the far end may still be importing, and the natural next move — run it again — would
+put two imports into one database. A second run refuses and tells you who holds it and since when.
+After six hours the lock is treated as stale and taken over with a warning; `--force-unlock` overrides
+sooner, once you have checked nothing is still running.
+
+**No `wp` on the remote.** Upload the phar and point at it:
+
+```bash
+scp "$(command -v wp)" deploy@example.com:~/wp-cli.phar
+wp migrate_app_remote ./my_site_to_migrated --to=@prod \
+   --wp-binary='/usr/local/bin/ea-php81 ~/wp-cli.phar'
+```
+
+The explicit PHP binary matters more than it looks. On cPanel the default `php` is often an ancient
+5.6 while the site runs 8.1 — `ea-php81`, `ea-php82` and friends are the real ones.
+
+`--wp-binary` may name an interpreter and a script, but it must not end in a WP-CLI *flag*.
+`php ~/wp-cli.phar` is fine; `wp --allow-root` is not, when combined with `--identity` or
+`--proxyjump`. WP-CLI needs the connection details to be its first argument and a trailing flag takes
+that slot. Use the environment instead:
+
+```bash
+--wp-binary='WP_CLI_ALLOW_ROOT=1 php ~/wp-cli.phar'
+```
+
+The command checks for this and says so rather than failing with `'@migrate-app-target' is not a
+registered wp command`.
+
+**`open_basedir`.** PHP is often confined to `~/public_html` plus a temp directory, which makes a
+package staged in `$HOME/.migrate-app` unreadable to the very process that has to read it. Preflight
+reads `open_basedir` and refuses up front rather than letting it surface later as a confusing "file
+not found". If it does, stage inside the webroot and clean up afterwards:
+
+```bash
+wp migrate_app_remote ./my_site_to_migrated --to=@prod \
+   --staging=/home/deploy/public_html/.migrate-app
+wp migrate_app_remote ./my_site_to_migrated --to=@prod --cleanup-only
+```
+
+The second command is not optional in that case. A database dump under a live webroot is a download
+link.
+
+#### Remote mode: `Cannot connect to <host>`
+
+Exit 255 from ssh, which means the connection never opened. In order of likelihood: the host key is
+unknown (`ssh user@host` once and accept it), the key is not loaded (`ssh-add -l`, or pass
+`--identity=~/.ssh/id_ed25519`), or the port is wrong. The tool never disables host-key checking, so
+"unknown host key" and "wrong key" both look the same from here — running plain `ssh` tells you which.
+
+### Remote mode: `unix_listener: path ... too long for Unix domain socket`
+
+The shared-connection socket exceeded the 104-byte UNIX limit. The tool computes a short path under
+`/tmp` and silently drops connection sharing if even that would not fit, so you should not see this
+— if you do, `TMPDIR` is unusually long and `MIGRATE_APP_SSH_OPTS="-o ControlMaster=no"` is the
+escape hatch. The cost is authenticating once per step instead of once per run.
+
+### Remote mode: `rsync: unrecognized option '--info=...'`
+
+An rsync that does not speak a flag the other end used. The tool deliberately sticks to `--stats`
+rather than `--info=stats1`, because macOS ships openrsync now and openrsync rejects GNU-only
+options outright. If you still hit this, uninstalling rsync on the remote falls back to a tar stream
+— which works, but cannot resume.
+
+### Remote mode: `'@migrate-app-target' is not a registered wp command`
+
+`--wp-binary` ends in a WP-CLI flag, and the flag took the argument slot the connection alias needs.
+`wp --allow-root` is the usual culprit. Move the flag into the environment:
+
+```bash
+--wp-binary='WP_CLI_ALLOW_ROOT=1 php ~/wp-cli.phar'
+```
+
+The command checks for this before it hands off, so you should get the explanation rather than the
+raw error.
+
+### Remote mode: `Another migration holds this remote`
+
+A previous run did not finish cleanly. Because the migration runs attached, a dropped connection can
+leave the far end still importing — so this refusal exists to stop a second import landing in the
+same database. Check first:
+
+```bash
+ssh deploy@example.com 'ps aux | grep -i "[m]igrate_app\|[m]ysql"'
+```
+
+If nothing is running, re-run with `--force-unlock`. Locks older than six hours are taken over
+automatically with a warning.
+
+### Remote mode: the connection dropped mid-import
+
+This is the one genuinely unhandled case. The destination database may be partially imported. Your
+backup is on **your** machine — the run printed its path, and it was pulled and verified before the
+import started. Restore it:
+
+```bash
+wp --ssh=@prod db import /home/deploy/.migrate-app/migrate-app-backup-....sql
+```
+
+If the remote copy is gone, push yours back up first with `scp`, then import. Re-running
+`migrate_app_remote` from scratch is also viable, but restore first — a partially imported database
+is not a clean starting point.
+
+## Things worth knowing about remote mode
+
+**`--ssh` and this command do not combine.** `wp --ssh=@prod migrate_app_remote ...` ships *this*
+command to the remote and looks for your package there. WP-CLI intercepts `--ssh` before dispatch and
+strips it from the arguments, so the command cannot detect it and refuse — the error it gives you
+names the cause instead. Use `--to`.
+
+**`--identity` reaches both legs, but only because of a workaround.** WP-CLI's `--ssh` cannot carry an
+identity file — it reads keys from *alias* config only. So the migration leg is handed a synthesised
+runtime alias rather than a bare `--ssh=`. If you have an `IdentityFile` for the host in
+`~/.ssh/config` you will never notice; if you rely on `--identity`, this is what makes it work.
+
+**macOS ships openrsync now, and it is fine.** It reports itself as rsync 2.6.9 and rejects GNU-only
+options, so the upload uses `--stats` rather than `--info=stats1`. Resume still works.
+
+**Uploads resume, tar streams do not.** With `rsync` on both ends an interrupted transfer picks up
+where it stopped. Without it the fallback is a tar stream over SSH, which restarts from zero — you
+get a warning saying so. On anything large, installing `rsync` on the remote is worth the five
+minutes.
+
+**A dropped connection during the import is not handled.** The migration runs attached, so closing
+your laptop mid-import leaves a half-imported database. For a large database, run it from somewhere
+that stays awake, or add `ServerAliveInterval 30` to your `~/.ssh/config` for the host — that covers
+NAT idle timeouts, though not a closed lid.
+
+**A destination left with a fatal plugin cannot be migrated again.** `migrate_app` loads WordPress,
+so if a migrated plugin fatals, WP-CLI cannot boot the site and a second run fails outright. The
+first run tells you which plugin and how to disable it. `--cleanup-only` still works regardless — it
+never loads WordPress.
+
+**The remote's global WP-CLI config is bypassed during the migration.** The uploaded tool is loaded
+through `WP_CLI_CONFIG_PATH` pointed at a small generated config in the staging directory, because
+`--require` is resolved on *your* machine during bootstrap and a remote-only path fails there. A
+project `wp-cli.yml` in the WordPress root is still read normally.
 
 ---
 

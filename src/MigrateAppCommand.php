@@ -1214,11 +1214,27 @@ class MigrateAppCommand {
 				WP_CLI::warning( sprintf( 'Could not fully remove %s — delete it by hand.', $folder ) );
 			}
 		} else {
+			/*
+			 * "Publicly reachable" is only true when the folder is under ABSPATH.
+			 * Remote mode stages packages OUTSIDE the webroot on purpose, and
+			 * claiming a `$HOME/.migrate-app` path is web-exposed is both alarming
+			 * and false — the kind of warning that teaches operators to ignore
+			 * warnings.
+			 */
+			$abspath = realpath( untrailingslashit( ABSPATH ) );
+			$real    = realpath( $folder );
+			$in_web  = $abspath && $real && 0 === strpos( $real . '/', $abspath . '/' );
+
 			WP_CLI::warning(
-				sprintf(
-					"The source folder is still in your webroot and is publicly reachable:\n  %s\nIt contains dup-installer/, which is a remote code execution surface. Delete it now, or re-run with --cleanup.",
-					$folder
-				)
+				$in_web
+					? sprintf(
+						"The source folder is still in your webroot and is publicly reachable:\n  %s\nIt contains dup-installer/, which is a remote code execution surface. Delete it now, or re-run with --cleanup.",
+						$folder
+					)
+					: sprintf(
+						"The source folder is still on disk:\n  %s\nIt is outside the webroot, so it is not reachable over HTTP, but it still holds a full copy of the source database. Delete it when you are done, or re-run with --cleanup.",
+						$folder
+					)
 			);
 		}
 

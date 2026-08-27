@@ -1,9 +1,9 @@
 ---
 project: wp-cli-migrate-app
-task: Build `wp migrate_app <folder>` — Duplicator-package migrator for an existing WP instance
+task: `wp migrate_app` — Duplicator-package migrator, local and over SSH
 effort: E3
 phase: complete
-progress: 51/51
+progress: 79/81
 mode: build
 started: 2026-08-27
 updated: 2026-08-27
@@ -135,6 +135,39 @@ every step without writing.
 - [x] ISC-50: preflight verifies the server knows the collation declared in the dump before dropping any table
 - [x] ISC-51: README documents why `guid` is excluded from replacement
 
+### Remote mode — `wp migrate_app_remote` (added 2026-08-27)
+
+- [x] ISC-52: the command registers `before_wp_load` and runs where there is no WordPress
+- [x] ISC-53: `--to=` accepts a WP-CLI alias and a raw connection string, parsed with WP-CLI's own `parse_ssh_url`
+- [x] ISC-54: Anti: a group alias (`@all`) is refused
+- [x] ISC-55: Anti: no password is accepted anywhere; keys and ssh-agent only
+- [x] ISC-56: Anti: `StrictHostKeyChecking` is never disabled — `MIGRATE_APP_SSH_OPTS` is the escape hatch and does not weaken it
+- [x] ISC-57: preflight asserts `wp-config.php` at the remote path
+- [x] ISC-58: preflight refuses when WP-CLI does not run on the remote, naming the phar workaround
+- [x] ISC-59: preflight reads remote PHP and refuses below 7.4
+- [x] ISC-60: preflight reads `open_basedir` and refuses a staging path PHP cannot read
+- [x] ISC-61: free-space gate uses portable `du -sk` / `df -Pk` and budgets 3x
+- [x] ISC-62: the tool and package are staged outside the webroot
+- [x] ISC-63: Anti: the staged dump is not reachable over HTTP — verified with a real GET against a live server
+- [x] ISC-64: the upload uses rsync and resumes; a second push transfers almost nothing
+- [x] ISC-65: Anti: macOS resource forks and `.DS_Store` do not cross to the remote
+- [x] ISC-66: the tar fallback warns that it cannot resume
+- [x] ISC-67: push and run are separately invocable (`--push-only`, `--skip-push`)
+- [x] ISC-68: the backup is exported, pulled home and verified BEFORE the import starts
+- [x] ISC-69: a truncated or non-SQL backup aborts the run — `Fs::looks_like_sql_dump` unit-probed four ways
+- [x] ISC-70: a remote lock blocks a concurrent second run, with a stale-takeover policy and `--force-unlock`
+- [x] ISC-71: the confirmation names the resolved host, path, home URL and database size, not the alias
+- [x] ISC-72: `--dry-run` transfers nothing and stages nothing
+- [x] ISC-73: `--cleanup-only` removes the staging directory without loading WordPress
+- [x] ISC-74: `--identity` applies to the migration leg as well as the upload
+- [x] ISC-75: Anti: `--wp-binary` ending in a WP-CLI flag is refused when it would displace the connection alias
+- [x] ISC-76: the remote exit code propagates to the local shell
+- [x] ISC-77: Anti: `src/MigrateAppCommand.php` changed in exactly one place — the webroot-exposure message — and the local e2e still passes unchanged
+- [x] ISC-78: the remote path is end-to-end tested over a real sshd, not only over `docker:`
+- [ ] ISC-79: [DROPPED — see Decisions 2026-08-27] a `remote:` block in `migration.yaml`
+- [ ] ISC-80: [NOT BUILT — see Decisions 2026-08-27] detached execution surviving a dropped connection
+
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -197,6 +230,28 @@ every step without writing.
   7.4 compatibility. Linted all five files and ran the 26-assertion harness under a real
   `php:7.4-cli` container: green.
 
+- **2026-08-27 — remote mode rides WP-CLI's `--ssh` rather than owning the transport for the run.**
+  The earlier design called for detached execution under `nohup` so a dropped connection could not
+  kill an import. ISC-43 refuted the combination: `Runner::run_ssh_command()` `passthru`s a fixed
+  template and `WP_CLI_SSH_PRE_CMD` only prepends, so there is no seam to background anything.
+  Detachment and `--ssh` are mutually exclusive. Chose `--ssh` — smaller, and it keeps WP-CLI's
+  scheme handling, tty and exit-code propagation. The hazard is documented, not fixed; ISC-70 (lock)
+  is the mitigation that mattered, because the realistic damage from a drop is a *second* concurrent
+  import, not the first partial one.
+- **2026-08-27 — ISC-79 dropped: no `remote:` block in `migration.yaml`.** That file is uploaded to
+  the destination. Putting host, user and key path in it would ship connection details to the very
+  server being migrated into. WP-CLI aliases already solve this and keep the secret local.
+- **2026-08-27 — ISC-77: `MigrateAppCommand.php` was changed, deliberately, in one place.** The
+  post-run notice claimed any leftover source folder was "in your webroot and publicly reachable".
+  Remote mode stages outside the webroot on purpose, so the claim became false — and a warning that
+  cries wolf teaches operators to ignore warnings. The message is now conditional on the folder being
+  under `ABSPATH`. The local e2e passes unchanged, which is what the anti-criterion was protecting.
+- **2026-08-27 — did not add `--skip-plugins` to the handoff.** It would make a second migration
+  possible on a destination left with a fatal plugin, which is tempting. But
+  `WP_CLI::runcommand(launch => true)` forwards the caller's runtime config to children unless the
+  child command repeats the flag, and `finish()` runs `rewrite flush --hard` without it on purpose.
+  The fix would silently neuter the flush. Left alone; documented instead.
+
 ## Changelog
 
 - **conjectured:** `wp db import` is the reliable way to stream a dump, so the import step can
@@ -242,6 +297,36 @@ every step without writing.
   makes it the most likely step to fail and the worst one to report dishonestly.
   **criterion now:** the flush step reports `WARN` with the failing plugin, the file:line, and the
   recovery commands.
+
+- **conjectured:** the migration could be handed to the remote with
+  `wp --ssh=<target> --require=<remote>/migrate-app.php migrate_app <pkg>`, since WP-CLI forwards
+  every argument verbatim. **refuted by:** the first end-to-end run — `Error: Required file
+  'migrate-app.php' doesn't exist (from runtime argument)`, raised by the LOCAL process. `--require`
+  is resolved at bootstrap step 31 (`LoadRequiredCommand`), and the SSH dispatch does not happen
+  until `LaunchRunner` at step 37. The same string therefore has to be valid on both machines, which
+  in general it cannot be. **learned:** "arguments are forwarded verbatim" is not the same as
+  "arguments are only interpreted remotely"; anything WP-CLI acts on during bootstrap is acted on
+  twice. **criterion now:** the require travels in a generated config the remote reads through
+  `WP_CLI_CONFIG_PATH`, set via `WP_CLI_SSH_PRE_CMD` (ISC-52).
+
+- **conjectured:** `ControlPath=%C` was enough to stay inside the 104-byte UNIX socket limit — it was
+  written into the code as a comment warning future maintainers about exactly that limit.
+  **refuted by:** every SSH connection failing with exit 255 and no message.
+  `unix_listener: path "/var/folders/n9/<32>/T/mgapp-<40 hex>.<16 random>" too long`. `%C` is 40
+  characters, macOS `$TMPDIR` is ~50, and OpenSSH appends a random 17-character suffix while the
+  master is being established. **learned:** knowing about a limit is not the same as budgeting for
+  it; the failure mode is indistinguishable from a network problem because `-q` swallows the reason.
+  **criterion now:** a short deterministic socket name under `/tmp`, plus a length check that drops
+  multiplexing entirely rather than failing to connect.
+
+- **conjectured:** a green `docker:`-transport end-to-end run demonstrated remote mode worked.
+  **refuted by:** the advisor pass — `docker exec`/`docker cp` touches no ssh, no rsync, no
+  ControlMaster, so 21/21 said nothing about the shipped path. Standing up a real sshd immediately
+  surfaced three genuine defects: the ControlPath overflow above, `--info=stats1` being rejected by
+  the openrsync that macOS now ships, and `--identity` silently not applying to the migration leg
+  because WP-CLI reads keys from alias config only. **learned:** a test double that replaces the
+  component under test proves the orchestration and nothing else. **criterion now:** ISC-78 — the
+  remote path is tested over a real sshd, with the docker transport kept as a second pass.
 
 ## Verification
 
@@ -308,3 +393,34 @@ an isolated Docker container, destination prefix deliberately set to `dst_` agai
 `max_allowed_packet`, `wait_timeout`, `DEFINER` clauses in dumped views/triggers, OPcache staleness
 after cutover, and the abort path under a mid-import kill. `assert_import_complete()` now detects the
 partial-import *symptom*, but those conditions were not themselves reproduced.
+
+### Remote mode (2026-08-27)
+
+`./tests/e2e-remote.sh <package>` — **27/27 green**, run twice over two transports:
+a real sshd in the container (generated ed25519 key, scanned host key, rsync over ssh) and
+`docker exec`/`docker cp`. Load-bearing evidence from that run:
+
+```
+PASS upload used rsync, not the tar fallback        matched
+PASS first push transferred the package             yes
+PASS second push transferred almost nothing         yes      <- resume works
+PASS macOS cruft did not travel                     0
+PASS the web server is actually serving             200
+PASS the staged dump is NOT reachable over HTTP     404      <- the point of the feature
+PASS backup came home before the import             yes
+PASS backup is the PRE-migration database           yes
+PASS no wp_ tables leaked                           0
+PASS siteurl rewritten on the remote                https://new-site.test
+PASS serialized options corrupted                   0
+PASS second run fails loudly, does not half-run     1
+PASS staging removed from the remote                no
+```
+
+Regression: `php tests/probe.php` 31 passed / 0 failed / 2 skipped; `./tests/e2e.sh <package>`
+E2E GREEN, unchanged. PHP 7.4 lint clean across all nine files.
+
+**Not verified.** A dropped connection mid-import (ISC-80): the run is attached, so the failure is
+real and documented rather than handled. Import idempotency under interruption is untested — the
+lock (ISC-70) prevents the concurrent-import case, which is the one that compounds. `open_basedir`
+refusal (ISC-60) is coded and reviewed but never observed firing, because the container is
+unrestricted; the same is true of the free-space refusal (ISC-61) and the tar fallback (ISC-66).

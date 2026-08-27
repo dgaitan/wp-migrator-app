@@ -5,9 +5,15 @@ plausibly go wrong; nothing here restates good general practice.
 
 ## What this is
 
-A WP-CLI command, `wp migrate_app <folder_name>`, that imports an uploaded WordPress package
-(typically Duplicator Lite) into an **already-working** WordPress installation, rewrites URLs, and
-merges themes/plugins/uploads into the live site. It runs entirely from the destination server.
+Two WP-CLI commands.
+
+`wp migrate_app <folder_name>` imports an uploaded WordPress package (typically Duplicator Lite) into
+an **already-working** WordPress installation, rewrites URLs, and merges themes/plugins/uploads into
+the live site. It runs on the destination server.
+
+`wp migrate_app_remote <folder> --to=<target>` runs on the operator's machine: it preflights a remote
+host, uploads the package outside its webroot, pulls a verified backup home, and then runs the first
+command over there. It is a transport wrapper — it never migrates anything itself.
 
 `ISA.md` is the system of record: the ideal state, the criteria, the decision log, and the evidence.
 Read it before changing behaviour. Update it when behaviour changes.
@@ -35,6 +41,12 @@ yourself reaching for one, the answer is a `WP_CLI::runcommand()` call plus a fa
 | Sub-commands in the danger window need `--skip-plugins --skip-themes` | `search-replace` runs after the import but **before** files are merged, so `active_plugins` names code that is not on disk yet. Booting it risks a fatal that aborts a half-finished replacement. `rewrite flush` is the deliberate exception — it needs plugins to register CPT rules. |
 | `rsync` must be `-aI`, never `-a` | `-a` preserves mtimes and rsync's quick check compares size+mtime, so a same-size source edit is **skipped** and the stale destination file wins. `-I` forces every transfer and matches the PHP fallback's always-overwrite behaviour. |
 | Nothing destructive before the backup exists | If `wp db export` produces nothing, stop. Do not continue without an undo. |
+| `migrate_app_remote` must never duplicate migration logic | It preflights, moves bytes, and hands off. The far end runs the byte-identical `migrate_app`. Anything else means two implementations drifting. |
+| The remote handoff must NOT use `--require=<remote path>` | `--require` is resolved during **local** bootstrap, before the SSH dispatch, so a remote-only path fails on the near side with "Required file doesn't exist". The require travels in a generated config the remote reads via `WP_CLI_CONFIG_PATH`. Verified empirically; it is not a guess. |
+| Do not add `--skip-plugins` to the handoff | `WP_CLI::runcommand(launch => true)` forwards the caller's runtime config to children unless the child command string repeats the flag. `finish()` runs `rewrite flush --hard` **without** it on purpose, so an outer `--skip-plugins` would silently neuter the flush. |
+| The remote backup is pulled home **before** the import | A backup on the machine you are about to overwrite is not an undo — that is exactly the machine you cannot reach when it goes wrong. Pull, verify it parses as SQL, then pass `--skip-backup` so the DB is dumped once. |
+| Never accept an SSH password | Keys and `ssh-agent` only. Never disable `StrictHostKeyChecking`. |
+| `rsync` from macOS must not be `-a` | `-a` drags resource forks, `.DS_Store` and local uid/gid onto a Linux host. Use `-rlptDz --no-owner --no-group` plus explicit excludes. ControlPath must use `%C` or long hostnames exceed the 104-char socket limit. |
 | Every error path after the backup prints **both** restore forms | `wp db import` and a plain `mysql ... < backup`. See the MySQL 9 gotcha — the hosts where the import fails are the hosts where a `wp db import` rollback also fails. |
 
 ## Gotchas
@@ -51,6 +63,19 @@ that no *child* directory is itself a plugin.
 **A migrated plugin can fatal during `rewrite flush`.** That is the first moment the migrated code
 actually executes. It must not abort the run — the migration is already done — but it must not report
 `ok` either. Report `WARN`, name the plugin, and tell the operator how to recover.
+
+**A package can now live outside the webroot.** Remote mode stages in `$HOME/.migrate-app`. Any
+message that says "publicly reachable" must first check the folder is actually under `ABSPATH` —
+`post_run_notices()` does. A warning that cries wolf teaches operators to ignore warnings.
+
+**Two copies of this tool can load in one run.** Installed as a package, `--require`d from a
+checkout, and uploaded to a remote — all at once. Guards key on `class_exists` and on whether the
+command name is taken, never on a constant: a constant only helps when every copy in play is new
+enough to define it, which is precisely the case you cannot rely on.
+
+**`--ssh` cannot be combined with `migrate_app_remote`, and cannot be guarded against.** WP-CLI
+intercepts `--ssh` before dispatch and strips it from argv, so the command runs on the remote and
+never sees the flag. The hint therefore lives on the "not a directory" error the operator does see.
 
 **Duplicator's `dup-archive__*.txt` is JSON despite the extension.** It carries `wp_tableprefix`,
 `subsites[0].domain`, `adminUsers`, and the origin's absolute `home` path. Prefer it over parsing.
@@ -83,7 +108,20 @@ PKG=/path/to/extracted/package php tests/probe.php
 # asserts the result, tears everything down. Destination prefix is dst_ on
 # purpose so every run exercises the prefix rewrite.
 ./tests/e2e.sh /path/to/extracted/package
+
+# End-to-end for remote mode — 21 assertions, no SSH server involved. WP-CLI's
+# --ssh accepts a docker: scheme and Ssh.php has a matching docker backend, so
+# the whole remote path runs against a container.
+./tests/e2e-remote.sh /path/to/extracted/package
 ```
+
+Both e2e rigs set `WP_CLI_PACKAGES_DIR` to a temp dir. Without it, a copy of this tool installed via
+`wp package install` loads alongside the checkout and the run dies on a class redeclaration.
+
+The remote rig uses **MariaDB**, not MySQL 8, deliberately: the `wordpress:cli` image ships the
+MariaDB client, which cannot reach a MySQL 8 server here at all — it rejects the self-signed TLS
+cert, and with `--skip-ssl` it cannot load `caching_sha2_password`. MySQL 8 coverage lives in
+`e2e.sh`, where the client runs on the host.
 
 **Static analysis is not evidence here.** The four most serious bugs this tool has had — the rsync
 mtime skip, the Hello Dolly misdetection, the MySQL 9 `SOURCE` failure, and the rollback hint that
@@ -96,9 +134,12 @@ inherited it — all passed `php -l` and all passed code review. Every one was c
 migrate-app.php            bootstrap; returns early unless WP_CLI is defined
 src/MigrateAppCommand.php  the sequencer — preflight, backup, import, replace, merge, finish
 src/Duplicator.php         reads dup-archive JSON + scans the dump for options
+src/MigrateAppRemoteCommand.php  the transport wrapper — preflight, push, backup-and-pull, handoff
+src/Ssh.php                connection resolution, remote exec, rsync/docker push and pull
 src/Fs.php                 path resolution, additive merge, theme/plugin cardinality
 src/Yaml.php               three-tier YAML loader + dumper
 tests/probe.php            unit harness
-tests/e2e.sh               containerised end-to-end
+tests/e2e.sh               containerised end-to-end, local mode
+tests/e2e-remote.sh        containerised end-to-end, remote mode via the docker: scheme
 ISA.md                     system of record — criteria, decisions, evidence
 ```
