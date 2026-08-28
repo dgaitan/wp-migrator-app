@@ -123,10 +123,27 @@ MariaDB client, which cannot reach a MySQL 8 server here at all — it rejects t
 cert, and with `--skip-ssl` it cannot load `caching_sha2_password`. MySQL 8 coverage lives in
 `e2e.sh`, where the client runs on the host.
 
-**Static analysis is not evidence here.** The four most serious bugs this tool has had — the rsync
-mtime skip, the Hello Dolly misdetection, the MySQL 9 `SOURCE` failure, and the rollback hint that
-inherited it — all passed `php -l` and all passed code review. Every one was caught by running
-`tests/e2e.sh`. Run it.
+**Static analysis is not evidence here.** The five most serious bugs this tool has had — the rsync
+mtime skip, the Hello Dolly misdetection, the MySQL 9 `SOURCE` failure, the rollback hint that
+inherited it, and the single-quote blindness in `rewrite_prefix()` — all passed `php -l` and all
+passed code review. Every one was caught by running an e2e. Run them.
+
+**A new producer for an existing consumer is a new interface.** `migrate_app_pull` did not change one
+line of the importer, and it still broke it: the value-level prefix pattern accepted double-quoted
+option names only, which Duplicator emits and mysqldump does not, so every pulled package stripped
+every user of their role. "The engine is untouched" is not a safety argument once you have changed
+what the engine is fed. Any new way of producing a package must be tested by *installing* one, not by
+inspecting it.
+
+**The folder is the only interface between the two steps.** `migrate_app_pull` writes a folder and
+stops; `migrate_app` and `migrate_app_remote` read a folder and nothing else. Do not add a command
+that goes origin-to-destination directly, however convenient it looks — it needs agent-forwarding or
+a private key on the origin, it assumes two hosts can reach each other, and it destroys the on-disk
+checkpoint that makes a failed second leg cheap. See ISC-124.
+
+**Never pull `wp-config.php`.** Not as an exclude pattern — structurally. The pull addresses
+`wp-content` subdirectories by name so the file cannot be reached. An exclusion the operator can
+switch off is a footgun; credentials and salts have no business on a laptop.
 
 ## File map
 
@@ -134,12 +151,14 @@ inherited it — all passed `php -l` and all passed code review. Every one was c
 migrate-app.php            bootstrap; returns early unless WP_CLI is defined
 src/MigrateAppCommand.php  the sequencer — preflight, backup, import, replace, merge, finish
 src/Duplicator.php         reads dup-archive JSON + scans the dump for options
-src/MigrateAppRemoteCommand.php  the transport wrapper — preflight, push, backup-and-pull, handoff
+src/MigrateAppRemoteCommand.php  step 2, remote — preflight, push, backup-and-pull, handoff
+src/MigrateAppPullCommand.php    step 1 — preflight, pull files then db, write the manifest
 src/Ssh.php                connection resolution, remote exec, rsync/docker push and pull
 src/Fs.php                 path resolution, additive merge, theme/plugin cardinality
 src/Yaml.php               three-tier YAML loader + dumper
 tests/probe.php            unit harness
 tests/e2e.sh               containerised end-to-end, local mode
-tests/e2e-remote.sh        containerised end-to-end, remote mode via the docker: scheme
+tests/e2e-remote.sh        containerised end-to-end, remote install over a real sshd + docker:
+tests/e2e-pull.sh          containerised end-to-end, BOTH steps: two WordPress installs, A into B
 ISA.md                     system of record — criteria, decisions, evidence
 ```

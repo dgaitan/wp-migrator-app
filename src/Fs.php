@@ -337,13 +337,6 @@ class Fs {
 	}
 
 	/**
-	 * Recursively delete a directory. Used only by --cleanup, and only ever
-	 * against the source folder the operator named.
-	 *
-	 * @param string $path Directory.
-	 * @return bool
-	 */
-	/**
 	 * Whether a file plausibly is a SQL dump.
 	 *
 	 * Used to check a database backup before anything destructive runs. A
@@ -376,6 +369,50 @@ class Fs {
 		return false;
 	}
 
+	/**
+	 * Whether a SQL dump reached its end, rather than being cut off.
+	 *
+	 * `looks_like_sql_dump()` reads the head, which is exactly the part a
+	 * truncated transfer still gets right — so it cannot tell a whole dump from
+	 * half of one. This reads the tail instead, looking for the completion
+	 * marker mysqldump and mariadb-dump both write as their last line.
+	 *
+	 * Only meaningful for dumps produced by those tools. A dump assembled some
+	 * other way may legitimately lack the marker, which is why the caller uses
+	 * a byte-for-byte size comparison whenever one is available and falls back
+	 * to this only for streamed exports.
+	 *
+	 * @param string $path File path.
+	 * @return bool
+	 */
+	public static function sql_dump_is_complete( $path ) {
+		if ( ! is_file( $path ) || filesize( $path ) < 1024 ) {
+			return false;
+		}
+
+		$handle = fopen( $path, 'r' );
+
+		if ( ! $handle ) {
+			return false;
+		}
+
+		$size = (int) filesize( $path );
+		$span = min( 4096, $size );
+
+		fseek( $handle, -$span, SEEK_END );
+		$tail = (string) fread( $handle, $span );
+		fclose( $handle );
+
+		return false !== stripos( $tail, 'Dump completed' );
+	}
+
+	/**
+	 * Recursively delete a directory. Used only by --cleanup, and only ever
+	 * against the source folder the operator named.
+	 *
+	 * @param string $path Directory.
+	 * @return bool
+	 */
 	public static function rmdir_recursive( $path ) {
 		if ( ! is_dir( $path ) ) {
 			return false;

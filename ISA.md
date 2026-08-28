@@ -3,10 +3,10 @@ project: wp-cli-migrate-app
 task: `wp migrate_app` — Duplicator-package migrator, local and over SSH
 effort: E3
 phase: complete
-progress: 79/81
+progress: 128/134
 mode: build
 started: 2026-08-27
-updated: 2026-08-27
+updated: 2026-08-28
 ---
 
 ## Problem
@@ -30,10 +30,16 @@ you only fill in what it could not infer.
 ## Out of Scope
 
 Multisite / subsite migration. Downloading or unpacking the Duplicator `.zip`/`.daf` archive (the
-folder is expected already extracted). Reaching the origin server for anything. Rewriting the
+folder is expected already extracted). Rewriting the
 destination `wp-config.php` or its DB credentials. Merging `mu-plugins`, drop-ins, or arbitrary
 `wp-content` subdirectories beyond themes/plugins/uploads. Any Duplicator paid-tier feature. Migrating
 *into* a WordPress install that does not yet exist.
+
+**Revised 2026-08-27:** "Reaching the origin server for anything" was removed. It encoded a fact about
+one migration — no SSH to that particular origin — not a property of the tool. Pull mode (ISC-81..116)
+reaches an origin *the operator can already log into*, read-only apart from a temp dump it cleans up.
+Writing to an origin remains out of scope: a pull never imports, never rewrites URLs, never touches a
+row on the far end.
 
 ## Principles
 
@@ -51,7 +57,8 @@ destination `wp-config.php` or its DB credentials. Merging `mu-plugins`, drop-in
 - Runs as a WP-CLI command inside a bootstrapped WordPress instance (`wp migrate_app <folder_name>`).
 - PHP 7.4+ / WP-CLI 2.x. No Composer dependency required at runtime — YAML parsing must degrade from
   Symfony YAML → WP-CLI's bundled Spyc → a built-in flat-mapping parser.
-- Destination-side execution only. No network calls to the origin.
+- Destination-side execution only for `migrate_app` and `migrate_app_remote`. A pull command may
+  read from an origin over SSH, but never writes to it beyond a temp dump it removes.
 - The source folder is addressed by name relative to `ABSPATH`, exactly as the user described.
 - Sub-operations that need fresh WordPress state (`search-replace`, `rewrite flush`) run as separate
   WP-CLI processes, because the calling process bootstrapped against the pre-import database.
@@ -167,6 +174,116 @@ every step without writing.
 - [ ] ISC-79: [DROPPED — see Decisions 2026-08-27] a `remote:` block in `migration.yaml`
 - [ ] ISC-80: [NOT BUILT — see Decisions 2026-08-27] detached execution surviving a dropped connection
 
+### Pull mode and server-to-server — PROPOSED, not built (2026-08-27)
+
+Awaiting go-ahead. These describe the ideal state of a `migrate_app_pull` command and of
+server-to-server migration by composition. Nothing below is shipped; `phase: complete` above refers
+to the local and push-remote scope only.
+
+**Transport**
+
+- [x] ISC-81: `Ssh::pull_dir()` exists and mirrors `push_dir()` across the same three backends — `docker cp`, rsync, tar-over-pipe
+- [x] ISC-82: `pull_dir()` uses the identical openrsync-safe flag set (`-rlptDz --partial --stats --no-owner --no-group`)
+- [x] ISC-83: `rsync_excludes()` is applied in the origin -> local direction too
+- [x] ISC-84: an interrupted pull resumes — a second run reports ~0 bytes transferred
+- [ ] ISC-85: two `Ssh` instances for two different hosts coexist in one process without a ControlPath collision
+- [x] ISC-86: Anti: `pull_dir()` never writes outside the named local destination
+
+**Export from the origin**
+
+- [x] ISC-87: `wp db export` runs on the origin over SSH and the dump is brought home
+- [x] ISC-88: the pulled dump passes `Fs::looks_like_sql_dump()` before the package is declared good
+- [x] ISC-89: `--stream-db` exports via `wp db export -` so no writable temp dir is needed on the origin
+- [x] ISC-90: the temporary dump is removed from the origin after a successful pull
+- [x] ISC-91: Anti: the origin database is never modified — no import, no search-replace, no option write
+- [x] ISC-92: `origin_url` is read from the origin via `wp option get home`, never guessed
+- [x] ISC-93: `table_prefix` is read from the origin via `wp db prefix`, never parsed out of the dump
+
+**Package shape — the pulled folder is importable with no hand-editing**
+
+- [x] ISC-94: the folder contains `wp-content/themes/<template>` and `<stylesheet>` for the origin's active theme
+- [x] ISC-95: the folder contains `wp-content/plugins`
+- [x] ISC-96: the folder contains `wp-content/uploads` unless `--skip-uploads`
+- [x] ISC-97: a `migration.yaml` is written carrying origin_url, target_url, theme_path, plugin_path, uploads_path, database, table_prefix
+- [x] ISC-98: `target_url` is written EMPTY, so the importer falls back to the destination's own `home_url()`
+- [x] ISC-99: `wp migrate_app <pulled-folder> --dry-run` accepts the package with zero hand-editing
+- [x] ISC-100: Anti: the pulled package contains no `wp-config.php` and no `.git`
+
+**Live-origin consistency**
+
+- [x] ISC-101: files are pulled BEFORE the database dump, so the DB is the newest artifact in the package
+- [ ] ISC-102: [NOT BUILT] the capture window — first byte to dump complete — is printed in the report
+- [ ] ISC-103: [NOT BUILT — documented instead, see README 'Files first, database last'] a maintenance-mode hint is offered when the origin looks like live production
+- [x] ISC-104: Anti: maintenance mode is never enabled on the origin without an explicit `--maintenance` (held trivially — no `--maintenance` flag exists and nothing writes to the origin)
+
+**Preflight and operator surface**
+
+- [x] ISC-105: `du -sk` sizes for uploads, plugins, themes and the database are printed before any transfer
+- [x] ISC-106: the confirmation prints origin host, origin path, origin home URL, total bytes, and the local destination
+- [x] ISC-107: `--dry-run` reports what would be pulled and transfers nothing
+- [x] ISC-108: free space on the LOCAL disk is checked against the measured origin size
+- [x] ISC-109: `--skip-uploads`, `--skip-db` and `--skip-files` each work independently
+
+**Server-to-server, by composition**
+
+- [x] ISC-110: `migrate_app_pull A` then `migrate_app_remote <folder> --to=B` completes a server-to-server migration with no third command
+- [x] ISC-111: the intermediate package is a usable standalone backup of A
+- [x] ISC-112: A and B never need network reachability to each other
+- [x] ISC-113: A and B may use different keys, ports and jump hosts
+
+**Handling of production data**
+
+- [x] ISC-114: Anti: a pulled package directory cannot be committed — `.gitignore` covers the whole folder, not only `*.sql`
+- [x] ISC-115: the operator is told, at the end of a pull, that the folder holds a full production database
+- [x] ISC-116: Anti: no SSH password is ever accepted, on either leg
+
+**Raised by the Advisor at VERIFY, 2026-08-27**
+
+- [x] ISC-117: preflight proves the origin can actually run `mysqldump` — `wp db export` shells out, and
+  shared hosts with `disable_functions=exec,proc_open` are exactly this tool's population
+- [x] ISC-118: Anti: a truncated dump is never accepted — a remote-computed byte count or checksum is
+  asserted locally, because `Fs::looks_like_sql_dump()` only reads the head of the file
+- [x] ISC-119: the origin temp dump is removed on the FAILURE path, not only on success
+- [x] ISC-120: Anti: no origin database credentials or salts reach the local package — `wp-config.php` is
+  never pulled; prefix, home and siteurl are read via `wp config get` / `wp option get` and synthesized
+- [x] ISC-121: backup-plugin archive directories (`updraft`, `backwpup`, `ai1wm-backups`,
+  `wpvividbackups`) and page/object caches are excluded by default — they are frequently tens of GB and
+  often contain *other* full database dumps
+- [x] ISC-122: Anti: a multisite origin is refused with a clear message rather than pulled into a subtly
+  broken package
+- [ ] ISC-123: [NOT BUILT] server-to-server preflights origin-vs-destination PHP and WordPress version
+  skew before the push leg runs — step two already reports remote PHP and WP-CLI versions, but nothing
+  compares them against the origin's
+- [x] ISC-124: Anti: no dedicated `A -> B` command exists — the package on disk between the two commands
+  IS the checkpoint, and a wrapper would reintroduce the dropped-connection failure as one long-running
+  local process
+
+**Found by the round-trip test, 2026-08-28**
+
+- [x] ISC-125: the prefix rewriter rewrites `{prefix}user_roles`, `{prefix}capabilities` and
+  `{prefix}user_level` in SINGLE-quoted dumps as well as double-quoted ones — mysqldump, and so
+  `wp db export`, and so every pulled package, writes single quotes
+- [x] ISC-126: Anti: a failed preflight leaves no empty destination folder behind
+- [x] ISC-127: a transport failure during preflight is reported as a connection problem, not as a
+  missing `wp-config.php`
+- [x] ISC-128: a pulled package installs into a destination with a DIFFERENT table prefix and every
+  user keeps their role
+
+**Raised by the Advisor at VERIFY, 2026-08-28**
+
+- [x] ISC-129: the prefix rewriter corrects the byte length of PHP-serialized strings that embed the
+  prefix — `s:15:"wp_capabilities"` becomes `s:16:"dst_capabilities"`, not a 16-byte string still
+  declaring 15
+- [x] ISC-130: Anti: no rewritten serialized payload fails `unserialize()` — probed against the
+  corrected and uncorrected forms so the test proves the difference, not just the result
+- [x] ISC-131: a pulled package folder is `0700` and its dump `0600` — on a shared machine the default
+  umask hands a production database to every other account
+- [x] ISC-132: the capture window is written into the manifest and printed at the end, naming both
+  timestamps and saying plainly that later origin writes are not included
+- [x] ISC-133: Anti: the remote cleanup `rm` refuses any path that is not under `/tmp/migrate-app-pull-`
+  and ending `.sql`
+
+
 
 ## Test Strategy
 
@@ -181,6 +298,13 @@ every step without writing.
 | ISC-16..20 | live | run the generator against the reference package | yaml written, values correct | Bash (php harness) |
 | ISC-25,26 | anti | grep for `wp-config` writes and for unprefixed `DROP TABLE` | 0 hits | Bash grep |
 | ISC-39 | live | build a temp fixture tree, run the merge function, list result | destination-only dir still present | Bash (php harness) |
+| ISC-81..86 | live | `tests/e2e-pull.sh` against the sshd container, pull then re-pull | 2nd run ~0 bytes | Bash |
+| ISC-87..93 | live | pull from the container, inspect dump header and generated yaml | prefix + origin_url match source | Bash |
+| ISC-94..100 | live | `find` the pulled folder; `grep` the yaml | all paths present, no wp-config.php | Bash |
+| ISC-101..104 | trace | read the ordering in the command; assert dump mtime > files mtime | DB is newest | Bash stat |
+| ISC-105..109 | live | run with each skip flag and with `--dry-run` | reported bytes match, 0 transferred on dry-run | Bash |
+| ISC-110..113 | live | pull from container A, push to container B, assert B serves A's content | HTTP 200 + origin string present | Bash curl |
+| ISC-114..116 | anti | `git check-ignore` the pulled folder; grep for any password prompt | ignored; 0 hits | Bash |
 
 ## Features
 
@@ -193,8 +317,92 @@ every step without writing.
 | db-import | prefix reconcile, drop, stream import, temp cleanup | ISC-29..33 | safety-rails | no |
 | url-replace | three-pass serialization-safe replacement + option re-assert | ISC-34..38 | db-import | no |
 | file-merge | rsync/PHP additive merge + finish tasks | ISC-39..41 | safety-rails | yes |
+| pull-transport | `Ssh::pull_dir()` — mirror of `push_dir` across all three backends | ISC-81..86 | — | yes |
+| pull-export | remote `wp db export` + detection of origin_url and prefix | ISC-87..93 | pull-transport | yes |
+| pull-package | assemble the folder and write `migration.yaml` with an empty target_url | ISC-94..100 | pull-export | no |
+| pull-safety | ordering, capture window, sizes, space check, skip flags, data warning | ISC-101..109, 114..116 | pull-package | no |
+| server-to-server | compose pull + existing `migrate_app_remote`; docs and e2e only | ISC-110..113 | pull-safety | no |
 
 ## Decisions
+
+- **2026-08-28 - the Advisor raised nine risks; three were already covered, one was a real bug.**
+  Checked each against the code rather than accepting the list. Already handled: `capabilities` and
+  `user_level` were always in the rewritten key set and are asserted behaviourally
+  (`wp user list --role=administrator` on the destination); step two still backs the destination up
+  before importing (`backup came home before the import` in the remote e2e); the local free-space gate
+  exists in `confirm()`. Genuinely missed and now fixed: serialized byte lengths (ISC-129/130), file
+  permissions (ISC-131), capture-window reporting (ISC-132), the unguarded remote `rm` (ISC-133).
+  `--stream-db` is now documented as experimental rather than as a peer of the default path, because
+  it has never run against a live origin.
+
+- **2026-08-28 - `MigrateAppCommand.php` changed a second time, deliberately.** ISC-77 recorded that
+  the local command had been touched in exactly one place. It has now been touched in two. The second
+  is `rewrite_prefix()`, and it is a correctness fix rather than churn: the value-level pattern
+  accepted double-quoted option names only, so `wp_user_roles` survived unrewritten in any dump from
+  mysqldump. Pull mode makes that the common case rather than the rare one. ISC-77 is amended rather
+  than dropped, because its intent - do not refactor the working importer while adding transports -
+  still holds.
+
+- **2026-08-28 - the folder is the only interface, and no command may shortcut it.** `migrate_app_pull`
+  writes a folder and stops; the install commands read a folder and nothing else. Neither knows the
+  other exists. This is what makes local-install, remote-install and server-to-server the same two
+  steps in different orders, and it is why ISC-124 refuses a direct `A -> B` command even though one
+  would be easy to write.
+
+- **2026-08-28 - the destination folder is created after preflight, not before.** A pull that fails on
+  a bad key used to leave an empty directory behind. Small, but it trains the operator to ignore
+  directories, and the next thing they ignore is a real one. ISC-126.
+
+- **2026-08-28 - Delegation floor deliberately unmet, third time (show your math).** E3 soft floor is
+  >=2; 0 selected. The session system prompt forbids the Agent tool unless the user asks. The
+  substitute this run was a real round-trip e2e over two live WordPress installs, which found a
+  shipped data-loss bug that no amount of cross-reading would have.
+
+- **2026-08-27 - refined: the origin-access constraint was situational, not architectural.** The ISA
+  declared "Reaching the origin server for anything" out of scope and "no network calls to the origin"
+  a constraint. Both encoded a single fact - the operator had no SSH to *that* origin, which is the
+  whole reason the tool runs destination-side. Asked whether a pull direction is possible, the
+  FirstPrinciples classification says soft: nothing in the design depends on the origin being
+  unreachable. Constraint revised to "may read from an origin over SSH, never writes to it." The hard
+  part is unchanged and unchangeable: pull needs SSH to the origin, so it cannot help the migration
+  currently in flight.
+
+- **2026-08-27 - server-to-server gets no command of its own.** Considered a dedicated A-to-B command
+  that streams between two hosts. Rejected, and the load-bearing reason is key custody, not topology:
+  a direct A-to-B transfer needs either agent-forwarding into a host you may not trust, or your private
+  key written onto A. Both are strictly worse than paying for a second transfer. Secondarily, direct
+  A-to-B requires the two hosts to reach each other, which is false across most shared hosts, and it
+  produces no artifact - if the run dies halfway there is nothing to resume from and nothing to
+  inspect. Routing through the operator's machine costs a
+  second transfer and buys: works across any two hosts, different keys and jump hosts per leg, and a
+  standalone backup of A that outlives the migration. So server-to-server is `migrate_app_pull`
+  followed by the `migrate_app_remote` that already ships. ISC-110..113.
+
+- **2026-08-27 - pull mode is largely already written, in the wrong place.**
+  `MigrateAppRemoteCommand::backup()` already SSHes to a WordPress install, runs `wp db export`,
+  brings the dump home with `pull_file()` and plausibility-checks it with `Fs::looks_like_sql_dump()`.
+  That is the export half of a pull. What is missing is `pull_dir()` (the mirror of `push_dir()`, same
+  three backends) and live-site detection of `origin_url` and `table_prefix`; the manifest itself can
+  reuse `generate_config()` once the folder is assembled. The engine is untouched, because the package
+  folder is the interface between transport and engine. Resist quoting a percentage-complete: what
+  already exists is the *transport*, which was always the part this repo owned. The unbuilt work is
+  preflight, consistency ordering, and the refusals in ISC-117..124.
+
+- **2026-08-27 - composition verified, not assumed.** The Advisor flagged "pull then push needs no new
+  command" as the highest-risk unverified claim, on the theory that the importer might depend on a
+  hand-edited `migration.yaml`. Checked: `MigrateAppCommand.php:212-224` reads `origin_url` and
+  `target_url` out of the package's own yaml, and a blank `target_url` falls back to the destination's
+  `home_url()`. Composition holds, conditional on the pull writing a valid manifest — ISC-97, ISC-98.
+
+- **2026-08-27 - a pulled package writes `target_url` empty on purpose.** ISC-98. The importer already
+  falls back to the destination's own `home_url()` when the value is blank, and the URL-mismatch
+  warning added earlier today fires when it is wrong. A pull cannot know where the package will land,
+  so guessing a target is strictly worse than declining to.
+
+- **2026-08-27 - Delegation floor deliberately unmet, second time (show your math).** E3 soft floor is
+  >=2; 0 selected. The session system prompt forbids the Agent tool unless the user asks. Delegation
+  would have bought a Forge cross-read of the pull design; the substitute is that the design mirrors
+  code already e2e-verified over a real sshd, plus an Advisor call at VERIFY.
 
 - **2026-08-27 — Delegation floor deliberately unmet (show your math).** E3 soft floor is >=2
   delegation capabilities; 0 selected. The session system prompt explicitly forbids the Agent tool
@@ -253,6 +461,60 @@ every step without writing.
   The fix would silently neuter the flush. Left alone; documented instead.
 
 ## Changelog
+
+- **2026-08-28 — the rewriter broke serialized data while fixing serialized data**
+  - **conjectured:** the single-quote fix to `rewrite_prefix()` closed the prefix-rewriting hole. Both
+    quote styles now matched, eight unit cases passed including non-matches, and the round trip was
+    green with roles intact on the destination.
+  - **refuted by:** the Advisor asking whether any probe used prefixes of *different lengths* with the
+    token inside a serialized blob. None did. `a:1:{s:15:"wp_capabilities";b:1;}` came out as
+    `a:1:{s:15:"dst_capabilities";b:1;}` — sixteen bytes still declaring fifteen. `unserialize()`
+    returns `false` on that, silently, so the setting does not error, it evaporates. The tool's own
+    first principle is "serialized data is structured data, never `sed` on a SQL file", and its dump
+    rewriter was doing exactly that to itself.
+  - **learned:** a fix aimed at one class of failure inherits every assumption of the code it lands
+    in. The eight probe cases all varied the *quoting* because quoting was the bug in front of me;
+    none varied the *length*, which was the bug underneath it. When adding cases to a regression test,
+    vary the dimension nobody has thought about yet, not the one that just failed.
+  - **criterion now:** ISC-129 and ISC-130 — the length is recomputed from the rewritten value, and
+    the probe asserts both that the corrected payload unserializes and that the uncorrected one does
+    not, so the test fails if the fix is ever reverted.
+
+- **2026-08-28 — the importer could not read its own tool's dumps**
+  - **conjectured:** pull mode was additive. The install path was e2e-verified over a real sshd and
+    the engine was untouched, so a package assembled by `migrate_app_pull` would install exactly like
+    a Duplicator one.
+  - **refuted by:** the first green round trip. `wp migrate_app_remote ./pulled --to=B` aborted with
+    "`dst_user_roles` is missing after import. Every user would have no role and you would be locked
+    out." The value-level prefix pattern in `rewrite_prefix()` was `/"wp_(user_roles|...)"/` —
+    double quotes only. Duplicator's dumps happen to use them; mysqldump does not. Every package this
+    new command produces would have stripped every user of their role.
+  - **learned:** "the engine is untouched, so the engine is fine" is not a safety argument when you
+    have changed what the engine is fed. A new producer for an existing consumer is a new interface,
+    and the interface is where the assumptions live. Two things saved this: the importer's own
+    post-import guard, which refused rather than half-completing, and an e2e that installed the pulled
+    package instead of merely inspecting it.
+  - **criterion now:** ISC-125 (both quote styles, unit-probed against eight cases including
+    non-matches), ISC-128 (a pulled package installs into a different-prefix destination with roles
+    intact, asserted live in `tests/e2e-pull.sh`).
+
+- **2026-08-27 — pull mode is mostly transport work**
+  - **conjectured:** a pull direction is roughly 70% already built, because the remote backup step
+    already exports a database over SSH and brings it home verified; what remains is a mirrored
+    `pull_dir()` and a config writer.
+  - **refuted by:** the Advisor call at VERIFY, which pointed out the figure measures only transport —
+    the half this repo already owned — and that the unbuilt half is preflight and refusals. Three
+    concrete gaps followed that I had not named: `wp db export` shells out to `mysqldump` and fails on
+    hosts with `disable_functions=exec,proc_open`, which is precisely this tool's population; a dump
+    streamed over stdout can truncate silently and still exit 0, and `looks_like_sql_dump()` reads only
+    the head; and pulling `wp-content` whole drags in backup-plugin archives that routinely hold other
+    full database dumps.
+  - **learned:** readiness estimates that count the code you already have are estimates of the wrong
+    thing. On a tool whose entire job is not corrupting a live site, the remaining work is almost always
+    the refusals, not the mechanism.
+  - **criterion now:** ISC-117..124 — a `mysqldump` capability preflight, an anti-truncation assertion,
+    failure-path cleanup, a credentials anti-criterion, default backup-archive excludes, a multisite
+    refusal, an A/B version-skew gate, and an explicit refusal to ever add a direct `A -> B` command.
 
 - **conjectured:** `wp db import` is the reliable way to stream a dump, so the import step can
   delegate to it and stop worrying.
@@ -329,6 +591,43 @@ every step without writing.
   remote path is tested over a real sshd, with the docker transport kept as a second pass.
 
 ## Verification
+
+**Pull mode and server-to-server — 2026-08-28**
+
+```
+php tests/probe.php                 ALL GREEN  57 passed, 0 failed, 2 skipped
+./tests/e2e-pull.sh                 PULL E2E GREEN    52/52
+./tests/e2e-remote.sh <package>     REMOTE E2E GREEN  (no regression from either rewrite_prefix change)
+php -l, and PHP 7.4 in a container  clean across migrate-app.php and src/*.php
+```
+
+- ISC-81..84, 86: `pull_dir` over rsync, docker cp and tar. Re-pull reported under 200 KB against a
+  14.7 MB package — resume works in the pull direction as it does in the push direction.
+- ISC-87..93: `origin_url is the origin's real home  https://old-site.test`,
+  `table_prefix is the ORIGIN's prefix  wp_`, `temp dump removed from the origin  0`.
+- ISC-94..100: `theme_path points at the active theme  wp-content/themes/origin-theme`,
+  `target_url is deliberately empty  1`, `no wp-config.php anywhere in the tree  0`,
+  `backup-plugin archive was excluded  0`.
+- ISC-110..113: the whole point. `B has the origin's site title  Origin Site`,
+  `B kept its own home URL  https://new-site.test`, `destination prefix preserved  dst_`,
+  `no old-site.test left in the post body  0` — origin A into destination B, two commands, two
+  different prefixes, two different URLs.
+- ISC-118: unit-probed both ways — a truncated dump passes the head check and fails the tail check,
+  which is the entire reason the tail check exists.
+- ISC-125, ISC-128: `the origin's administrator survived  1`,
+  `the roles option carries B's prefix  1`.
+- ISC-126, ISC-127: `a failed pull leaves no empty folder behind  no`,
+  `an unreachable origin says so plainly  matched`.
+
+- ISC-129..133: `serialized length is corrected  a:1:{s:16:"dst_capabilities";b:1;}`,
+  `the corrected payload unserializes  true`, `the UNcorrected payload would not have  false`,
+  `the package folder is 0700  700`, `the dump is 0600  600`,
+  `manifest records when the database was captured  1`.
+
+**Not verified.** ISC-85 (two simultaneous `Ssh` instances in one process) is not exercised: the two
+legs run as separate commands, so the situation does not arise yet. ISC-102, ISC-103 and ISC-123 are
+not built. The `--stream-db` path is coded and its truncation check is unit-probed, but no test has
+run it against a live origin.
 
 Probe harness: `php tests/probe.php` (26 assertions standalone, 44 with `PKG=`); end-to-end: `./tests/e2e.sh <pkg>`. Live environment: WordPress 6.7 on MySQL 8.4 in
 an isolated Docker container, destination prefix deliberately set to `dst_` against the package's

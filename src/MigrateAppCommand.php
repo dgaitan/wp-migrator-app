@@ -902,14 +902,45 @@ class MigrateAppCommand {
 		// Rows whose *value* embeds the prefix: wp_user_roles in options,
 		// wp_capabilities / wp_user_level in usermeta. Miss these and every user
 		// loses their role after the migration.
+		//
+		// Either quote style, and the same one back out. This accepted double
+		// quotes only until 1.2.0, which meant dumps from mysqldump — and so
+		// from `wp db export`, and so every package `migrate_app_pull` produces
+		// — sailed through with `wp_user_roles` unrewritten. The import guard in
+		// post_import_checks() caught it, but only after the destination
+		// database had already been replaced.
 		$meta_keys = array( 'user_roles', 'capabilities', 'user_level', 'dashboard_quick_press_last_post_id', 'user-settings', 'user-settings-time' );
-		$meta_re   = '/"' . $q . '(' . implode( '|', array_map( function ( $k ) {
+		$keys_re   = implode( '|', array_map( function ( $k ) {
 			return preg_quote( $k, '/' );
-		}, $meta_keys ) ) . ')"/';
+		}, $meta_keys ) );
+
+		$meta_re = '/([\'"])' . $q . '(' . $keys_re . ')\1/';
+
+		/*
+		 * The same token inside PHP-serialized data, where the string carries its
+		 * own byte length. `wp_` and `dst_` are different lengths, so rewriting
+		 * the content alone turns s:15:"wp_capabilities" into a 16-byte string
+		 * still claiming 15 — and unserialize() rejects that silently, returning
+		 * false. The setting does not error; it evaporates.
+		 *
+		 * This is the tool's own first principle applied to its own dump
+		 * rewriter: serialized data is structured data, so the length travels
+		 * with the content. Runs BEFORE the plain pattern, which would otherwise
+		 * consume the same match without touching the length.
+		 */
+		$serialized_re = '/s:(\d+):"' . $q . '(' . $keys_re . ')"/';
 
 		while ( ( $line = fgets( $in ) ) !== false ) {
 			$line = preg_replace( $identifier, '$1$2`' . $dst, $line );
-			$line = preg_replace( $meta_re, '"' . $dst . '$1"', $line );
+			$line = preg_replace_callback(
+				$serialized_re,
+				function ( $m ) use ( $dst ) {
+					$value = $dst . $m[2];
+					return 's:' . strlen( $value ) . ':"' . $value . '"';
+				},
+				$line
+			);
+			$line = preg_replace( $meta_re, '$1' . $dst . '$2$1', $line );
 			if ( false === fwrite( $out, $line ) ) {
 				fclose( $in );
 				fclose( $out );

@@ -1,37 +1,60 @@
 # wp migrate_app
 
-Import a WordPress package into an **existing, working** WordPress installation — rewriting URLs
-safely and merging the package's themes, plugins and uploads into the site that is already there.
+Move a WordPress site into an **existing, working** WordPress installation — rewriting URLs safely
+and merging the source's themes, plugins and uploads into the site that is already there.
 
-Built for the case Duplicator Lite cannot finish: you have the package, but the paid installer is
-what would have imported it, and there is no access to the origin server to do anything about it.
-Everything here runs from the destination side.
-
-Two commands. They do the same migration; they differ only in where you type it.
+Everything reduces to two steps.
 
 ```bash
-# You are ON the destination server, package already uploaded.
-wp migrate_app my_site_to_migrated
+# 1. Get the site into a folder.
+wp migrate_app_pull ./old-site --from=@old      # ...from a server you can SSH to
+                                                 # ...or just unzip a Duplicator package
 
-# You are on your own machine. It uploads the package and migrates over SSH.
-wp migrate_app_remote ./my_site_to_migrated --to=@prod
+# 2. Install that folder.
+wp migrate_app ./old-site                        # ...into WordPress on this machine
+wp migrate_app_remote ./old-site --to=@new       # ...into WordPress on another server
 ```
 
-### Which one do you want?
+**A folder is the only thing the two steps share.** Step one knows nothing about installing; step two
+knows nothing about where the folder came from. That is what makes the combinations free:
+server-to-server migration is step one against A, then step two against B. There is no third command
+for it, and there does not need to be one.
+
+### Step 1 — get the site into a folder
+
+| | |
+|---|---|
+| **`wp migrate_app_pull <folder> --from=<origin>`** | You have SSH to the source server. It brings the database and `wp-content` home and writes the manifest for you. |
+| **Unzip a Duplicator package** | You have no access to the source at all — only the export. Extract it and run `--generate-config`. See [Preparing the package](#preparing-the-package). |
+
+Both produce the same thing: a folder with a `migration.yaml`, a `.sql` dump, and `wp-content/`.
+
+### Step 2 — install that folder
 
 |  | `migrate_app` | `migrate_app_remote` |
 |---|---|---|
 | You run it | on the destination server | on your laptop |
 | Needs WordPress where you type it | yes | **no** |
-| Gets the package there | you do, by SFTP or File Manager | it does, over rsync |
-| Package ends up | in the webroot, publicly reachable until you delete it | outside the webroot, never web-reachable |
+| Gets the folder there | you do, by SFTP or File Manager | it does, over rsync |
+| Folder ends up | in the webroot, publicly reachable until you delete it | outside the webroot, never web-reachable |
 | Backup ends up | on the destination server | **on your machine**, before the import starts |
 | Needs SSH | no | yes, key-based |
 
-If you can SSH to the destination, prefer `migrate_app_remote` — it is fewer manual steps and it
-never leaves a copy of your database sitting under a live webroot. Everything below covers
-`migrate_app` first because the remote command runs it for you; the differences are in
-[Running it against a remote server](#running-it-against-a-remote-server).
+If you can SSH to the destination, prefer `migrate_app_remote` — fewer manual steps, and it never
+leaves a copy of your database sitting under a live webroot.
+
+### Which combination is yours?
+
+| Your situation | The two commands |
+|---|---|
+| Duplicator export, destination you can SSH to | unzip, then `migrate_app_remote ./pkg --to=@new` |
+| Duplicator export, you are already on the destination | unzip into the webroot, then `migrate_app ./pkg` |
+| **Server to server** | `migrate_app_pull ./site --from=@old`, then `migrate_app_remote ./site --to=@new` |
+| Production down to your laptop | `migrate_app_pull ./site --from=@prod`, then `migrate_app ./site` |
+
+> **`migrate_app_pull` needs SSH to the *source*.** If you only have access to the destination — the
+> case this tool was originally built for — you cannot pull. Use a Duplicator export as step one
+> instead. Everything from step two onward is identical either way.
 
 ---
 
@@ -42,10 +65,15 @@ never leaves a copy of your database sitting under a live webroot. Everything be
 - [Install](#install)
 - [Preparing the package](#preparing-the-package)
 
-**Running it**
+**Step 1 — getting the site into a folder**
+- [Preparing the package](#preparing-the-package) — from a Duplicator export
+- [Pulling a site from a server](#pulling-a-site-from-a-server) — over SSH, with `migrate_app_pull`
+
+**Step 2 — installing the folder**
 - [Usage — the three-step flow](#usage--the-three-step-flow)
 - [A complete worked run](#a-complete-worked-run)
 - [Running it against a remote server](#running-it-against-a-remote-server) — from your own machine, over SSH
+- [Server to server](#server-to-server) — the two steps back to back
 
 **Reference**
 - [migration.yaml reference](#migrationyaml-reference)
@@ -154,7 +182,158 @@ The folder name is yours to choose — it is the argument you pass to the comman
 
 ---
 
+## Pulling a site from a server
+
+`wp migrate_app_pull` is step one when you can SSH to the source. It brings the database and
+`wp-content` home into a folder, writes the `migration.yaml`, and stops. It installs nothing.
+
+```bash
+wp migrate_app_pull ./old-site --from=@old --dry-run   # measure first
+wp migrate_app_pull ./old-site --from=@old
+```
+
+`--from` takes the same target grammar as `--to`: a WP-CLI alias, or
+`[<user>@]<host>[:<port>][<path>]`. See [Naming the target](#naming-the-target).
+
+### What you get
+
+```
+old-site/
+├── migration.yaml
+├── old.example.com-20260828-011455.sql
+└── wp-content/
+    ├── themes/your-theme/
+    ├── plugins/
+    └── uploads/
+```
+
+That folder is a complete, installable package. Nothing needs editing before step two.
+
+### The origin is read-only
+
+The pull runs `wp db export` and reads a handful of options. It never imports, never rewrites a URL,
+never writes a row. The one file it creates on the far end is a temporary dump in `/tmp`, removed on
+the way out — **including when the run fails**, because a forgotten dump is a full copy of the
+database sitting on a server nobody is looking at.
+
+### What it deliberately does not bring
+
+| Left behind | Why |
+|---|---|
+| `wp-config.php` | Database credentials and salts. It is not excluded by pattern — the pull addresses `wp-content` subdirectories by name, so it cannot be reached at all. |
+| `updraft/`, `ai1wm-backups/`, `*.wpress`, `backwpup-*` | Backup-plugin archives. Routinely tens of gigabytes, and they usually contain *another* full copy of the database. |
+| `cache/`, `et-cache/`, `debug.log`, `node_modules/` | Regenerable. Costs transfer, buys nothing. |
+
+Add your own with `--exclude=pattern1,pattern2`.
+
+### `target_url` is written empty, on purpose
+
+A pull cannot know where the package will eventually land, so it declines to guess. Both install
+commands fall back to the destination's own `home_url()` when the value is blank — which in step two
+is exactly right. See [Which migration.yaml is used](#which-migrationyaml-is-used).
+
+### Files first, database last
+
+A live site changes while you are copying it. Of the two possible inconsistencies, an uploaded file
+that no row references yet is harmless; a row pointing at a file that was never copied is a broken
+page. So the files go first and the dump is taken last, making the database the newest thing in the
+package.
+
+For a site taking orders, this is still a window. Put the origin in maintenance mode yourself if the
+gap matters.
+
+### Proving the dump arrived whole
+
+A truncated dump is worse than no dump: it imports without complaint and loses data silently. The
+head of a cut-off dump looks perfect, so the head is not what gets checked.
+
+| Route | Proof |
+|---|---|
+| Default | The dump is written to a temp file on the origin, rsynced home (resumable), and the byte counts on both ends must match exactly. |
+| `--stream-db` | No file, no size to compare — so the dump's own trailing `Dump completed` marker must be present. Cannot resume. |
+
+Use `--stream-db` only when the origin has nowhere to write. It is marked experimental for a reason:
+it has been unit-probed but never run against a live origin, and the marker check is a smoke test
+where the byte comparison is a proof.
+
+### The capture window is recorded, not hidden
+
+The manifest carries both timestamps, and the run prints them:
+
+```
+Capture window:
+    files      2026-08-28 01:22:14 UTC
+    database   2026-08-28 01:24:02 UTC
+    Anything written to the origin after the database timestamp — orders, comments,
+    uploads — is not in this package. The gap widens for as long as you wait to install.
+```
+
+That last line is the one that matters. A package pulled on Monday and installed on Friday is missing
+five days of the origin's writes. Nothing warns you at install time, so check the timestamps.
+
+### The folder is production data
+
+It holds a full copy of the origin's database — users, hashed passwords, whatever a plugin parked in
+the options table — and the whole uploads tree. So:
+
+- the folder is created `0700` and the dump `0600`, because on a shared machine the default umask
+  hands all of it to every other account;
+- `.gitignore` covers pulled packages, not just `*.sql`;
+- delete it once the migration is done and verified. Nothing deletes it for you.
+
+`wp-config.php` is never pulled. Not as an exclusion you could switch off — the pull addresses
+`wp-content` subdirectories by name, so the file is unreachable by construction.
+
+### Pull flags
+
+| Flag | Effect |
+|---|---|
+| `--from=<target>` | **Required.** Alias or connection string for the origin. |
+| `--remote-path=<path>` | WordPress root on the origin, overriding the target's path. |
+| `--identity=<file>` | SSH private key. Defaults to your agent / `~/.ssh/config`. |
+| `--proxyjump=<spec>` | Passed to ssh as `-J`. |
+| `--wp-binary=<command>` | How to run WP-CLI on the origin when plain `wp` is not on its PATH. |
+| `--skip-uploads` | Leave the media library behind. |
+| `--skip-files` | Database only. |
+| `--skip-db` | Files only. |
+| `--stream-db` | **Experimental.** Export down the pipe instead of via a temp file. Weaker integrity check, no resume, not yet run against a live origin. |
+| `--exclude=<patterns>` | Extra comma-separated rsync excludes. |
+| `--dry-run` | Measure and report. Transfers nothing, creates nothing — not even the folder. |
+| `--yes` | Skip the confirmation. |
+| `--force` | Write into a folder that already holds a package. |
+
+### What the run shows you
+
+```
+Origin:      ssh:deploy@old.example.com/home/deploy/public_html
+Into:        /Users/you/old-site
+
+Checking the origin...
+
+About to pull:
+    host      old.example.com
+    path      /home/deploy/public_html
+    home URL  https://old.example.com
+    prefix    wp_
+    theme     mytheme (child of storefront)
+    themes    24.1 MB
+    plugins   118.4 MB
+    uploads   2.1 GB
+    ------------------------------
+    transfer  2.2 GB  (plus the database dump)
+    into      /Users/you/old-site
+    free here 407.8 GB
+
+The origin is read-only in this operation. Nothing is imported and no row is written there.
+
+Pull this site? [y/n]
+```
+
+---
+
 ## Usage — the three-step flow
+
+Step two, once you have a folder from either route above.
 
 > Running this from your own machine instead? Everything below still happens — it just happens over
 > SSH. Skip to [Running it against a remote server](#running-it-against-a-remote-server).
@@ -659,6 +838,35 @@ project `wp-cli.yml` in the WordPress root is still read normally.
 
 ---
 
+## Server to server
+
+There is no `A -> B` command, and that is a deliberate choice rather than a gap. Server-to-server is
+the two steps, back to back:
+
+```bash
+wp migrate_app_pull   ./site --from=@old
+wp migrate_app_remote ./site --to=@new
+```
+
+**Why route through your machine instead of host-to-host?** Key custody, mostly. A direct A-to-B
+transfer needs either agent-forwarding into a host you may not fully trust, or your private key
+written onto A. Paying for a second transfer is the cheaper trade. Beyond that:
+
+- **The two hosts never need to reach each other.** Most shared hosts cannot, and no amount of
+  cleverness in this tool would change that.
+- **Each leg is configured separately** — different keys, ports, jump hosts, `--wp-binary`.
+- **The folder between them is a checkpoint.** If step two fails, step one does not have to run
+  again. rsync resumes; the dump is already home.
+- **You end up holding a standalone backup of A** that outlives the migration.
+
+The one thing to watch is version skew: check that B's PHP and WordPress are not older than A's
+before you start. Step two's preflight reports both.
+
+Both legs are covered end to end in `tests/e2e-pull.sh`, which stands up two separate WordPress
+installs — different URLs, different table prefixes, different themes — and moves one into the other.
+
+---
+
 ## migration.yaml reference
 
 ```yaml
@@ -701,6 +909,9 @@ and plugins alone.
 ---
 
 ## Flags
+
+These are `migrate_app`'s. `migrate_app_remote` adds [its own](#remote-flags); `migrate_app_pull`
+has [a separate set](#pull-flags).
 
 | flag | effect |
 |---|---|
@@ -980,6 +1191,16 @@ PKG=/path/to/extracted/package php tests/probe.php
 # migration, assertions, then full teardown. Touches nothing you own. The
 # destination prefix is dst_ on purpose, so every run exercises the prefix rewrite.
 ./tests/e2e.sh /path/to/extracted/package
+
+# End-to-end for the remote install leg — a real sshd in the container, so
+# ssh(1), ControlMaster, rsync and the resume path are the tested ones. Also
+# runs the whole thing a second time over the docker: transport.
+./tests/e2e-remote.sh /path/to/extracted/package
+
+# End-to-end for BOTH steps: stands up two separate WordPress installs with
+# different URLs, prefixes and themes, pulls one into a folder and installs that
+# folder into the other. This is the server-to-server proof.
+./tests/e2e-pull.sh
 
 # PHP 7.4 compatibility.
 docker run --rm -v "$PWD":/app -w /app php:7.4-cli sh -c 'for f in migrate-app.php src/*.php; do php -l "$f"; done'

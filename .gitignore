@@ -15,6 +15,13 @@ migration.yaml
 /dup-installer/
 /my_site_to_migrated/
 
+# A folder written by `wp migrate_app_pull` is a full copy of a live site —
+# database, uploads, the lot. The *.sql rule above catches the dump; these catch
+# the rest of it. Anything holding a wp-content tree is a package, not source.
+/wp-content/
+/*/wp-content/
+/*/migration.yaml
+
 # --- Composer ----------------------------------------------------------------
 # This is a library (composer type: wp-cli-package), not an application, so the
 # lock file is deliberately not tracked — consumers resolve their own versions.

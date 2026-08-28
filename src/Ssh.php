@@ -614,6 +614,181 @@ class Ssh {
 	}
 
 	/**
+	 * Copy a remote directory's CONTENTS into a local directory. The mirror of
+	 * `push_dir()`, arrows reversed, same three backends and the same flag set.
+	 *
+	 * Deliberately the same code shape rather than a clever shared helper: the
+	 * two directions have different failure modes worth reading separately, and
+	 * the flag set is the part that took three attempts to get right on macOS.
+	 *
+	 * @param string $remote  Remote directory.
+	 * @param string $local   Local directory. Created if absent.
+	 * @param array  $exclude Extra exclude patterns on top of the standard set.
+	 * @param bool   $dry_run Report only.
+	 * @return array{method:string,bytes:int}
+	 */
+	public function pull_dir( $remote, $local, $exclude = array(), $dry_run = false ) {
+		$remote = rtrim( $remote, '/' );
+		$local  = rtrim( $local, '/' );
+
+		if ( $dry_run ) {
+			return array(
+				'method' => 'dry-run',
+				'bytes'  => $this->remote_dir_bytes( $remote ),
+			);
+		}
+
+		if ( ! is_dir( $local ) && ! mkdir( $local, 0755, true ) && ! is_dir( $local ) ) {
+			WP_CLI::error( sprintf( 'Could not create %s', $local ) );
+		}
+
+		if ( $this->is_docker() ) {
+			$cmd = sprintf(
+				'docker cp %s %s',
+				escapeshellarg( $this->host() . ':' . $remote . '/.' ),
+				escapeshellarg( $local )
+			);
+
+			$result = self::stream( $cmd );
+
+			if ( 0 !== $result ) {
+				WP_CLI::error( sprintf( 'docker cp failed (exit %d) copying %s', $result, $remote ) );
+			}
+
+			return array(
+				'method' => 'docker cp',
+				'bytes'  => self::dir_bytes( $local ),
+			);
+		}
+
+		if ( self::have( 'rsync' ) && $this->remote_has( 'rsync' ) ) {
+			$cmd = sprintf(
+				'rsync -rlptDz --partial --stats --no-owner --no-group %s -e %s %s/ %s/',
+				implode( ' ', self::rsync_excludes( $exclude ) ),
+				escapeshellarg( $this->ssh_prefix() ),
+				escapeshellarg( $this->host_target() . ':' . $remote ),
+				escapeshellarg( $local )
+			);
+
+			$result = self::stream( $cmd );
+
+			if ( 0 !== $result ) {
+				WP_CLI::error(
+					sprintf(
+						"rsync failed (exit %d) pulling %s.\nExit 23 or 24 usually means a permission problem on the far end — a directory the SSH user cannot read.",
+						$result,
+						$remote
+					)
+				);
+			}
+
+			return array(
+				'method' => 'rsync',
+				'bytes'  => self::dir_bytes( $local ),
+			);
+		}
+
+		WP_CLI::warning(
+			'rsync is not available on both ends. Falling back to a tar stream, which cannot resume if the connection drops.'
+		);
+
+		$tar_excludes = array();
+		foreach ( array_merge( array( '.DS_Store', '.git' ), (array) $exclude ) as $pattern ) {
+			$tar_excludes[] = '--exclude=' . escapeshellarg( $pattern );
+		}
+
+		$cmd = sprintf(
+			'%s %s %s | tar -C %s -xzf -',
+			$this->ssh_prefix(),
+			escapeshellarg( $this->host_target() ),
+			escapeshellarg( sprintf( 'tar -C %s %s -czf - .', escapeshellarg( $remote ), implode( ' ', $tar_excludes ) ) ),
+			escapeshellarg( $local )
+		);
+
+		$result = self::stream( $cmd );
+
+		if ( 0 !== $result ) {
+			WP_CLI::error( sprintf( 'tar transfer failed (exit %d)', $result ) );
+		}
+
+		return array(
+			'method' => 'tar',
+			'bytes'  => self::dir_bytes( $local ),
+		);
+	}
+
+	/**
+	 * Size of a remote directory, in bytes.
+	 *
+	 * `du -sk`, not `du -sb`: the latter is GNU-only and this runs against
+	 * whatever the host happens to ship.
+	 *
+	 * @param string $remote Remote directory.
+	 * @return int Bytes, or 0 if the directory is absent or unreadable.
+	 */
+	public function remote_dir_bytes( $remote ) {
+		$result = $this->exec( sprintf( 'du -sk %s 2>/dev/null', escapeshellarg( $remote ) ) );
+
+		if ( 0 !== $result['code'] || ! preg_match( '/^\s*(\d+)/', $result['out'], $m ) ) {
+			return 0;
+		}
+
+		return (int) $m[1] * 1024;
+	}
+
+	/**
+	 * Run a command on the target and write its stdout straight into a local
+	 * file, without staging anything on the far end.
+	 *
+	 * The escape hatch for origins with no writable temp directory. Nothing
+	 * about it is resumable — the caller is responsible for proving the result
+	 * arrived whole, because a severed pipe here still exits 0.
+	 *
+	 * @param string $command Remote command.
+	 * @param string $local   Local destination file.
+	 * @return int Exit code.
+	 */
+	public function pull_command_output( $command, $local ) {
+		if ( $this->is_docker() ) {
+			$cmd = sprintf(
+				'docker exec %s sh -c %s > %s',
+				escapeshellarg( $this->host() ),
+				escapeshellarg( $command ),
+				escapeshellarg( $local )
+			);
+		} else {
+			$cmd = sprintf(
+				'%s %s %s > %s',
+				$this->ssh_prefix(),
+				escapeshellarg( $this->host_target() ),
+				escapeshellarg( $command ),
+				escapeshellarg( $local )
+			);
+		}
+
+		return self::stream( $cmd );
+	}
+
+	/**
+	 * Byte size of a remote file, or 0 if it is not there.
+	 *
+	 * Used to prove a pulled dump arrived whole. `wc -c` rather than `stat`,
+	 * whose flags differ between GNU and BSD userlands.
+	 *
+	 * @param string $remote Remote file path.
+	 * @return int
+	 */
+	public function remote_file_bytes( $remote ) {
+		$result = $this->exec( sprintf( 'wc -c < %s 2>/dev/null', escapeshellarg( $remote ) ) );
+
+		if ( 0 !== $result['code'] || ! preg_match( '/(\d+)/', $result['out'], $m ) ) {
+			return 0;
+		}
+
+		return (int) $m[1];
+	}
+
+	/**
 	 * Whether a binary exists on the target. Cached — preflight asks twice.
 	 *
 	 * @param string $binary Binary name.
@@ -656,14 +831,52 @@ class Ssh {
 	 *
 	 * @return array<int,string>
 	 */
-	private static function rsync_excludes() {
+	private static function rsync_excludes( $extra = array() ) {
 		$out = array();
 
-		foreach ( array( '.DS_Store', '._*', '.Spotlight-V100', '.Trashes', 'Thumbs.db', '.git' ) as $pattern ) {
+		$patterns = array_merge(
+			array( '.DS_Store', '._*', '.Spotlight-V100', '.Trashes', 'Thumbs.db', '.git' ),
+			(array) $extra
+		);
+
+		foreach ( array_unique( $patterns ) as $pattern ) {
 			$out[] = '--exclude=' . escapeshellarg( $pattern );
 		}
 
 		return $out;
+	}
+
+	/**
+	 * What a pull should never drag home.
+	 *
+	 * Both categories were learned rather than imagined. Backup plugins park
+	 * multi-gigabyte archives inside `wp-content`, and those archives routinely
+	 * hold a full database dump of their own — pulling them copies the site's
+	 * database a second time, in a form nothing downstream will ever read.
+	 * Caches are regenerable by definition; carrying them costs transfer and
+	 * buys nothing.
+	 *
+	 * `wp-config.php` is NOT in this list. It is excluded unconditionally at the
+	 * command layer, because it is not a size problem — it is credentials and
+	 * salts, and an exclusion the operator can switch off would be a footgun.
+	 *
+	 * @return array<int,string>
+	 */
+	public static function content_noise() {
+		return array(
+			'updraft',
+			'backwpup-*',
+			'ai1wm-backups',
+			'wpvividbackups',
+			'backup-*',
+			'*.wpress',
+			'cache',
+			'et-cache',
+			'w3tc-config',
+			'wp-rocket-config',
+			'debug.log',
+			'node_modules',
+		);
 	}
 
 	/**

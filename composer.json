@@ -15,6 +15,6 @@
     "files": ["migrate-app.php"]
   },
   "extra": {
-    "commands": ["migrate_app", "migrate_app_remote"]
+    "commands": ["migrate_app", "migrate_app_pull", "migrate_app_remote"]
   }
 }

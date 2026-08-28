@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WP-CLI migrate_app
- * Description: `wp migrate_app <folder_name>` — imports an uploaded WordPress package (Duplicator or plain) into this installation, rewrites URLs, and merges themes/plugins/uploads. `wp migrate_app_remote <folder> --to=<target>` does the same against a remote install over SSH.
- * Version:     1.1.0
+ * Description: Two steps. `wp migrate_app_pull <folder> --from=<target>` brings a remote WordPress site home as a package folder; `wp migrate_app <folder>` installs that folder into a local install and `wp migrate_app_remote <folder> --to=<target>` installs it into a remote one over SSH.
+ * Version:     1.2.0
  * Requires PHP: 7.4
  * License:     MIT
  *
@@ -48,6 +48,7 @@ $migrate_app_classes = array(
 	'Ssh'                      => 'Ssh.php',
 	'Duplicator'               => 'Duplicator.php',
 	'MigrateAppCommand'        => 'MigrateAppCommand.php',
+	'MigrateAppPullCommand'    => 'MigrateAppPullCommand.php',
 	'MigrateAppRemoteCommand'  => 'MigrateAppRemoteCommand.php',
 );
 
@@ -77,6 +78,17 @@ if ( ! migrate_app_command_exists( 'migrate_app' ) && class_exists( '\MigrateApp
 		'\MigrateApp\MigrateAppCommand',
 		array(
 			'shortdesc' => 'Migrate an uploaded WordPress package into this installation.',
+		)
+	);
+}
+
+if ( ! migrate_app_command_exists( 'migrate_app_pull' ) && class_exists( '\MigrateApp\MigrateAppPullCommand' ) ) {
+	WP_CLI::add_command(
+		'migrate_app_pull',
+		'\MigrateApp\MigrateAppPullCommand',
+		array(
+			'shortdesc' => 'Pull a remote WordPress site into a local package folder.',
+			'when'      => 'before_wp_load',
 		)
 	);
 }
