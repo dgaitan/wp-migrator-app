@@ -117,7 +117,9 @@ class MigrateAppRemoteCommand {
 	 * : Passed through. Database only.
 	 *
 	 * [--config=<path>]
-	 * : Passed through. Config path relative to the staged package.
+	 * : Passed through to the migration. Resolved ON THE REMOTE — an absolute
+	 * remote path, or one relative to the remote WordPress root. Defaults to
+	 * `migration.yaml` inside the staged package.
 	 *
 	 * ## EXAMPLES
 	 *
@@ -279,9 +281,13 @@ class MigrateAppRemoteCommand {
 		if ( ! is_file( $path . '/migration.yaml' ) ) {
 			WP_CLI::error(
 				sprintf(
-					"No migration.yaml in %s\nGenerate one against this package first — it can be written on the destination:\n    wp migrate_app_remote %s --to=<target> --push-only\n    wp --ssh=<target> --require=<staging>/tool/migrate-app.php migrate_app <staged> --generate-config",
+					"No migration.yaml in %s\n"
+						. "It has to exist here, on this machine — it travels with the package and the remote reads the uploaded copy.\n\n"
+						. "Write one from migration.example.yaml, or let the local command fill it in from the Duplicator\n"
+						. "manifest against any working WordPress install (it only reads the package):\n"
+						. '    wp migrate_app %s --generate-config --path=/path/to/any/wordpress',
 					$path,
-					$folder
+					$path
 				)
 			);
 		}
@@ -485,14 +491,49 @@ class MigrateAppRemoteCommand {
 		$home = $ssh->exec( sprintf( 'cd %s && %s option get home --skip-plugins --skip-themes 2>/dev/null', escapeshellarg( $ssh->path() ), $this->remote_wp ) );
 		$size = $ssh->exec( sprintf( 'cd %s && %s db size --size_format=mb --skip-plugins --skip-themes 2>/dev/null', escapeshellarg( $ssh->path() ), $this->remote_wp ) );
 
+		$home_url = trim( $home['out'] );
+		$planned  = $this->planned_target( $local );
+
 		WP_CLI::log( '' );
 		WP_CLI::log( WP_CLI::colorize( '%yThis will overwrite the database and wp-content of:%n' ) );
 		WP_CLI::log( '    host      ' . $ssh->host_target() );
 		WP_CLI::log( '    path      ' . $ssh->path() );
-		WP_CLI::log( '    home URL  ' . ( '' !== trim( $home['out'] ) ? trim( $home['out'] ) : '(could not read)' ) );
+		WP_CLI::log( '    home URL  ' . ( '' !== $home_url ? $home_url : '(could not read)' ) );
 		WP_CLI::log( '    database  ' . ( '' !== trim( $size['out'] ) ? trim( $size['out'] ) . ' MB' : '(could not read)' ) );
 		WP_CLI::log( '    from      ' . $local . ' (' . Fs::human_bytes( (int) $facts['bytes'] ) . ')' );
+		WP_CLI::log(
+			'    URLs      ' . ( '' !== $planned['origin'] ? $planned['origin'] : '(auto-detected from the dump)' )
+				. '  ->  ' . ( '' !== $planned['target'] ? $planned['target'] : 'this site\'s home URL' )
+		);
 		WP_CLI::log( '' );
+
+		/*
+		 * The migration rewrites every URL in the database to target_url. If the
+		 * config still carries a target_url from somewhere else — a previous
+		 * run, a local test, a copied file — the whole site is rewritten to a
+		 * domain that is not this one, and nothing else in this prompt would
+		 * have shown it. The inner command does print the value, but only after
+		 * the operator has already said yes, because remote mode passes --yes.
+		 */
+		if ( '' !== $planned['target'] && '' !== $home_url ) {
+			$planned_host = (string) parse_url( $planned['target'], PHP_URL_HOST );
+			$remote_host  = (string) parse_url( $home_url, PHP_URL_HOST );
+
+			if ( '' !== $planned_host && '' !== $remote_host && strcasecmp( $planned_host, $remote_host ) !== 0 ) {
+				WP_CLI::warning(
+					sprintf(
+						"target_url in migration.yaml is %s, but this site's home URL is %s.\n"
+							. "Every URL in the database will be rewritten to %s, not to %s.\n"
+							. 'Fix target_url, or delete the value entirely and it will use this site\'s own home URL.',
+						$planned['target'],
+						$home_url,
+						$planned_host,
+						$remote_host
+					)
+				);
+				WP_CLI::log( '' );
+			}
+		}
 
 		if ( $this->dry_run ) {
 			return;
@@ -508,6 +549,42 @@ class MigrateAppRemoteCommand {
 		}
 
 		WP_CLI::confirm( 'Migrate into this site?' );
+	}
+
+	/**
+	 * The origin and target URLs the migration will actually use.
+	 *
+	 * Read here purely so the confirmation can show them. This command does not
+	 * otherwise parse migration.yaml — the remote reads the uploaded copy, and
+	 * that copy is the authority.
+	 *
+	 * @param string $local Local package directory.
+	 * @return array{origin:string,target:string}
+	 */
+	private function planned_target( $local ) {
+		$blank = array(
+			'origin' => '',
+			'target' => '',
+		);
+
+		$path = $local . '/migration.yaml';
+
+		if ( ! is_file( $path ) ) {
+			return $blank;
+		}
+
+		try {
+			$raw = Yaml::parse_file( $path );
+		} catch ( \Exception $e ) {
+			// Not fatal here: the remote parses it for real and will say so
+			// properly. This is only for the confirmation line.
+			return $blank;
+		}
+
+		return array(
+			'origin' => isset( $raw['origin_url'] ) ? trim( (string) $raw['origin_url'] ) : '',
+			'target' => isset( $raw['target_url'] ) ? trim( (string) $raw['target_url'] ) : '',
+		);
 	}
 
 	/**

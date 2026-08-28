@@ -350,6 +350,46 @@ re-running the decision to migrate.
 Step 4 is not optional housekeeping. Until you run it, a full copy of the source database is sitting
 on the server.
 
+### Which migration.yaml is used
+
+The one in your **local** package folder. It is not read on your machine — it is uploaded with
+everything else, and the remote reads the copy that lands in staging.
+
+Three consequences worth knowing:
+
+- **It must exist locally before anything starts.** The command refuses immediately if
+  `./my_site_to_migrated/migration.yaml` is missing, rather than uploading gigabytes and then
+  discovering there is nothing to act on.
+- **`--skip-push` uses the copy already on the server.** Edit your local file after pushing and the
+  next `--skip-push` run will not see the change. Re-push, or edit the staged copy directly at
+  `$HOME/.migrate-app/package/<folder>/migration.yaml`.
+- **`target_url` must be the remote site's URL, or empty.** Every URL in the database gets rewritten
+  to whatever it says. Leave the value blank and the migration uses the destination's own
+  `home_url()`, which in remote mode is almost always what you want — blank is a better default than
+  a guess. A stale value copied from another run is the dangerous case, so the confirmation now
+  prints the planned rewrite and warns when `target_url` does not match the site it is about to
+  change:
+
+  ```
+      URLs      https://old-site.com  ->  https://WRONG-SITE.example
+
+  Warning: target_url in migration.yaml is https://WRONG-SITE.example, but this site's home URL is
+  https://new-site.com. Every URL in the database will be rewritten to WRONG-SITE.example, not to
+  new-site.com. Fix target_url, or delete the value entirely and it will use this site's own home URL.
+  ```
+
+`--config=<path>` overrides which file is read, but it is resolved **on the remote** — an absolute
+remote path, or one relative to the remote WordPress root. It is not resolved against your machine
+or against the staged package.
+
+There is no `--generate-config` on the remote command yet. Write the file from
+[migration.example.yaml](migration.example.yaml), or let the local command fill it in from the
+Duplicator manifest against any working WordPress install — it only reads the package:
+
+```bash
+wp migrate_app ./my_site_to_migrated --generate-config --path=/path/to/any/wordpress
+```
+
 ### What the run shows you
 
 A dry run, and the same summary a real run opens with:

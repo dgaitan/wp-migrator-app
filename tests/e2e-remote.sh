@@ -227,6 +227,16 @@ GUARD="$(R ./no-such-package-here --to="$TO" 2>&1 || true)"
 assert_contains "missing package names the --ssh footgun" "$GUARD" "If you passed a global --ssh"
 
 echo
+echo "--- a wrong target_url is surfaced before anything runs ---"
+cp my_site_to_migrated/migration.yaml "${WORKDIR}/migration.yaml.good"
+sed -i.bak 's|^target_url:.*|target_url: https://WRONG-SITE.example|' my_site_to_migrated/migration.yaml
+MISMATCH="$(R ./my_site_to_migrated --to="$TO" --wp-binary="$REMOTE_WP" --dry-run 2>&1 || true)"
+assert_contains "mismatched target_url is warned about" "$MISMATCH" "will be rewritten to"
+assert_contains "the confirmation prints the planned rewrite" "$MISMATCH" "URLs"
+cp "${WORKDIR}/migration.yaml.good" my_site_to_migrated/migration.yaml
+rm -f my_site_to_migrated/migration.yaml.bak
+
+echo
 echo "--- dry run must change nothing ---"
 R ./my_site_to_migrated --to="$TO" --wp-binary="$REMOTE_WP" --dry-run >/dev/null
 assert "dry run staged nothing on the remote" \
