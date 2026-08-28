@@ -1,12 +1,25 @@
 <?php
 /**
- * Reads what a Duplicator package already knows about itself.
+ * Reads what a package already knows about itself.
  *
- * A Duplicator Lite package ships `dup-installer/dup-archive__<hash>.txt`, which
- * despite the extension is JSON, and carries the origin domain, the source table
- * prefix, the admin users and the WP/PHP/DB versions. Everything migration.yaml
- * needs is in there — so --generate-config writes the config instead of asking
- * the operator to transcribe it.
+ * Two formats, one internal shape.
+ *
+ * A **Duplicator Lite** package ships `dup-installer/dup-archive__<hash>.txt`,
+ * which despite the extension is JSON, and carries the origin domain, the source
+ * table prefix, the admin users and the WP/PHP/DB versions.
+ *
+ * A **Fiction Drafts** export (github.com/dgaitan/Fiction-Drafts) ships
+ * `manifest.json` at the archive root beside `database.sql`, carrying `home_url`,
+ * `table_prefix`, `multisite`, `active_theme` and the WP/PHP/MySQL versions.
+ * Fiction Drafts is deliberately export-only — its README states it will never
+ * restore, migrate or rewrite URLs — which makes it the exact other half of this
+ * tool.
+ *
+ * Everything `migration.yaml` needs is in either manifest, so `--generate-config`
+ * writes the config instead of asking the operator to transcribe it. The class
+ * keeps the Duplicator name because every accessor below is written against
+ * Duplicator's key shape; a Fiction Drafts manifest is normalised into that shape
+ * at load time rather than forking fifteen call sites.
  *
  * @package MigrateApp
  */
@@ -18,11 +31,17 @@ class Duplicator {
 	/** @var string Absolute path to the source folder. */
 	private $folder;
 
-	/** @var array|null Decoded dup-archive manifest, or null when absent. */
+	/** @var array|null Decoded manifest, normalised to Duplicator's key shape. */
 	private $manifest = null;
 
 	/** @var string|null Path to the manifest file. */
 	private $manifest_path = null;
+
+	/** @var string Format the manifest came from: 'duplicator', 'fiction-drafts', or ''. */
+	private $format = '';
+
+	/** @var array|null A Fiction Drafts manifest exactly as written, when that is the format. */
+	private $fd = null;
 
 	/**
 	 * @param string $folder Absolute path to the extracted package folder.
@@ -48,18 +67,172 @@ class Duplicator {
 			if ( is_array( $decoded ) ) {
 				$this->manifest      = $decoded;
 				$this->manifest_path = $path;
+				$this->format        = 'duplicator';
 				return;
 			}
 		}
+
+		$this->load_fiction_drafts_manifest();
 	}
 
 	/**
-	 * Was a Duplicator manifest found?
+	 * Recognise a Fiction Drafts export and normalise its manifest.
+	 *
+	 * Detection is structural rather than by name: the format's `schema` key is
+	 * the integer 1, which identifies nothing on its own, so the fingerprint is
+	 * the combination of keys no other manifest carries together.
+	 *
+	 * The normalisation deliberately does NOT populate `home` under a subsite.
+	 * Duplicator records the origin's absolute filesystem path there and
+	 * `source_abspath()` returns it; Fiction Drafts records no such path, and a
+	 * URL in that slot would make the stale-path check compare a URL against a
+	 * directory. Absent is correct — the caller already handles null.
+	 *
+	 * `active_theme` is likewise not used to override theme detection. Fiction
+	 * Drafts records the stylesheet only, while scanning the dump recovers both
+	 * template and stylesheet — so a child theme keeps its parent.
+	 *
+	 * @return void
+	 */
+	private function load_fiction_drafts_manifest() {
+		$path = $this->folder . '/manifest.json';
+
+		if ( ! is_file( $path ) ) {
+			return;
+		}
+
+		$decoded = json_decode( (string) file_get_contents( $path ), true );
+
+		if ( ! is_array( $decoded ) ) {
+			return;
+		}
+
+		$required = array( 'schema', 'table_prefix', 'home_url' );
+		foreach ( $required as $key ) {
+			if ( ! array_key_exists( $key, $decoded ) ) {
+				return;
+			}
+		}
+
+		if ( ! isset( $decoded['profile_areas'] ) && ! isset( $decoded['volumes'] ) ) {
+			return;
+		}
+
+		// parse_url(), not wp_parse_url(): this class is loaded standalone by
+		// tests/probe.php and must stay free of WordPress.
+		$home   = (string) $decoded['home_url'];
+		$domain = (string) parse_url( $home, PHP_URL_HOST );
+
+		$normalised = array(
+			'wp_tableprefix' => (string) $decoded['table_prefix'],
+			'mu_mode'        => ! empty( $decoded['multisite'] ),
+			'blogname'       => '' !== $domain ? $domain : $home,
+		);
+
+		$versions = array(
+			'version_wp'  => 'wp_version',
+			'version_php' => 'php_version',
+			'version_db'  => 'mysql_version',
+		);
+		foreach ( $versions as $ours => $theirs ) {
+			if ( ! empty( $decoded[ $theirs ] ) ) {
+				$normalised[ $ours ] = (string) $decoded[ $theirs ];
+			}
+		}
+
+		if ( '' !== $domain ) {
+			$normalised['subsites'] = array( array( 'domain' => $domain ) );
+		}
+
+		$this->manifest      = $normalised;
+		$this->manifest_path = $path;
+		$this->format        = 'fiction-drafts';
+		$this->fd            = $decoded;
+	}
+
+	/**
+	 * Was a manifest found, in either format?
 	 *
 	 * @return bool
 	 */
 	public function has_manifest() {
 		return null !== $this->manifest;
+	}
+
+	/**
+	 * Which format the manifest came from.
+	 *
+	 * @return string 'duplicator', 'fiction-drafts', or '' when there is none.
+	 */
+	public function format() {
+		return $this->format;
+	}
+
+	/**
+	 * A human label for the format, for messages the operator reads.
+	 *
+	 * @return string
+	 */
+	public function format_label() {
+		$labels = array(
+			'duplicator'     => 'Duplicator',
+			'fiction-drafts' => 'Fiction Drafts',
+		);
+
+		return isset( $labels[ $this->format ] ) ? $labels[ $this->format ] : '';
+	}
+
+	/**
+	 * The origin's home URL, when the manifest states it outright.
+	 *
+	 * Only Fiction Drafts records this; Duplicator carries a bare domain, which
+	 * is why `detect_origin_url()` prefers the dump and infers a scheme.
+	 *
+	 * @return string|null
+	 */
+	public function manifest_home_url() {
+		return ( null !== $this->fd && ! empty( $this->fd['home_url'] ) )
+			? rtrim( (string) $this->fd['home_url'], '/' )
+			: null;
+	}
+
+	/**
+	 * Whether the package is known to contain `wp-config.php`.
+	 *
+	 * Fiction Drafts excludes it by default and records the per-job choice. True
+	 * means the folder holds the origin's database password and all eight
+	 * authentication salts, which is worth saying out loud before a migration.
+	 *
+	 * @return bool|null Null when the manifest does not say.
+	 */
+	public function includes_wp_config() {
+		if ( null === $this->fd || ! array_key_exists( 'includes_wp_config', $this->fd ) ) {
+			return null;
+		}
+
+		return (bool) $this->fd['includes_wp_config'];
+	}
+
+	/**
+	 * What the export was asked to contain, when the manifest records it.
+	 *
+	 * A `database_only` or `files_no_media` export is a perfectly valid backup
+	 * and a partial migration source; the operator should be told which they
+	 * have before it is merged into a live site.
+	 *
+	 * @return array<string,bool> Empty when the manifest does not say.
+	 */
+	public function profile_areas() {
+		if ( null === $this->fd || ! isset( $this->fd['profile_areas'] ) || ! is_array( $this->fd['profile_areas'] ) ) {
+			return array();
+		}
+
+		$out = array();
+		foreach ( $this->fd['profile_areas'] as $area => $included ) {
+			$out[ (string) $area ] = (bool) $included;
+		}
+
+		return $out;
 	}
 
 	/**
@@ -332,9 +505,27 @@ class Duplicator {
 			return null;
 		}
 
-		$table   = ( $prefix ? $prefix : '' ) . 'options';
-		$needle  = 'INSERT INTO `' . $table . '`';
-		$pattern = '/`' . preg_quote( $table, '/' ) . '`\s+VALUES\s*\(\s*"?\d*"?\s*,\s*"' . preg_quote( $option, '/' ) . '"\s*,\s*"((?:[^"\\\\]|\\\\.)*)"/i';
+		$table  = ( $prefix ? $prefix : '' ) . 'options';
+		$needle = 'INSERT INTO `' . $table . '`';
+
+		/*
+		 * Match the option wherever it sits in the statement, in either quote
+		 * style. Both halves of that mattered:
+		 *
+		 * The old pattern was anchored to `VALUES (` and so only ever saw the
+		 * FIRST tuple. Duplicator writes one row per INSERT, so it never showed
+		 * — but mysqldump and Fiction Drafts both write extended inserts with
+		 * hundreds of rows per statement, where every option but the first was
+		 * invisible.
+		 *
+		 * It also hardcoded double quotes, which Duplicator emits and mysqldump
+		 * does not. Same blind spot the prefix rewriter had.
+		 *
+		 * Group 1 and 2 are the quote characters, backreferenced so an opening
+		 * `'` cannot be closed by a `"`; group 3 is the value, which may contain
+		 * escaped quotes and the other quote character unescaped.
+		 */
+		$pattern = '/([\'"])' . preg_quote( $option, '/' ) . '\1\s*,\s*([\'"])((?:\\\\.|(?!\2)[^\\\\])*)\2\s*[,)]/i';
 
 		$found = null;
 		while ( ( $line = fgets( $handle ) ) !== false ) {
@@ -342,7 +533,7 @@ class Duplicator {
 				continue;
 			}
 			if ( preg_match( $pattern, $line, $m ) ) {
-				$found = stripslashes( $m[1] );
+				$found = stripslashes( $m[3] );
 				break;
 			}
 		}

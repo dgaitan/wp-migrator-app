@@ -3,7 +3,7 @@ project: wp-cli-migrate-app
 task: `wp migrate_app` — Duplicator-package migrator, local and over SSH
 effort: E3
 phase: complete
-progress: 128/134
+progress: 142/147
 mode: build
 started: 2026-08-27
 updated: 2026-08-28
@@ -251,8 +251,8 @@ to the local and push-remote scope only.
   often contain *other* full database dumps
 - [x] ISC-122: Anti: a multisite origin is refused with a clear message rather than pulled into a subtly
   broken package
-- [ ] ISC-123: [NOT BUILT] server-to-server preflights origin-vs-destination PHP and WordPress version
-  skew before the push leg runs — step two already reports remote PHP and WP-CLI versions, but nothing
+- [x] ISC-123: [SUPERSEDED by ISC-141] version skew is now reported at preflight from the package
+  manifest, which is a better place for it than the transport — it works for a local install too — step two already reports remote PHP and WP-CLI versions, but nothing
   compares them against the origin's
 - [x] ISC-124: Anti: no dedicated `A -> B` command exists — the package on disk between the two commands
   IS the checkpoint, and a wrapper would reintroduce the dropped-connection failure as one long-running
@@ -282,6 +282,31 @@ to the local and push-remote scope only.
   timestamps and saying plainly that later origin writes are not included
 - [x] ISC-133: Anti: the remote cleanup `rm` refuses any path that is not under `/tmp/migrate-app-pull-`
   and ending `.sql`
+
+**Fiction Drafts interoperability, 2026-08-28**
+
+- [x] ISC-134: an unzipped Fiction Drafts export is recognised by its `manifest.json`, detected
+  structurally rather than by a name — its `schema` key is the integer 1 and identifies nothing
+- [x] ISC-135: `table_prefix`, `multisite` and the WP/PHP/MySQL versions are read from that manifest
+- [x] ISC-136: theme detection is NOT taken from the manifest — it records the stylesheet only, while
+  scanning the dump recovers the template too, so a child theme keeps its parent
+- [x] ISC-137: Anti: `source_abspath()` returns null for a Fiction Drafts package rather than a URL —
+  that slot is a filesystem path and the format records none
+- [x] ISC-138: a multisite Fiction Drafts export is refused, naming the manifest that said so
+- [x] ISC-139: a partial export (`database_only`, `files_no_media`) is reported at preflight
+- [x] ISC-140: an export carrying `wp-config.php` is warned about — it holds the origin's database
+  password and all eight salts
+- [x] ISC-141: a destination older than the source's PHP or WordPress is warned about, using the
+  versions the manifest carries — this is the origin/destination skew gate ISC-123 wanted
+- [x] ISC-142: the dump scanner finds an option anywhere in an extended INSERT, not only in the first
+  tuple
+- [x] ISC-143: the dump scanner accepts single-quoted and double-quoted values, with escaped quotes and
+  the opposite quote character inside the value
+- [x] ISC-144: Anti: an unrelated `manifest.json` is not claimed as a package
+- [x] ISC-145: `fiction-drafts-*` is excluded from a pull, for the case where
+  `FICTION_DRAFTS_STORAGE_DIR` has been relocated inside uploads
+- [x] ISC-146: `Fs::sql_dump_is_complete()` accepts Fiction Drafts' `SET FOREIGN_KEY_CHECKS=1` footer
+  as well as mysqldump's marker
 
 
 
@@ -324,6 +349,20 @@ to the local and push-remote scope only.
 | server-to-server | compose pull + existing `migrate_app_remote`; docs and e2e only | ISC-110..113 | pull-safety | no |
 
 ## Decisions
+
+- **2026-08-28 - Fiction Drafts is read by `Duplicator`, not by a new class.** Fiction Drafts
+  (github.com/dgaitan/Fiction-Drafts) is an export-only backup plugin whose README states it will never
+  restore, migrate or rewrite URLs. That makes it the exact complement of this tool. Considered a
+  `FictionDrafts` class behind a `PackageManifest` interface; rejected. `MigrateAppCommand` has fifteen
+  `$dup->` call sites and every one of them — including the multisite refusal and the version report —
+  starts working for the new format the moment its manifest is normalised into Duplicator's key shape
+  at load time. An interface would have been more code for less coverage. The class keeps its name and
+  its docblock says why.
+
+- **2026-08-28 - the manifest supersedes the transport-level skew gate.** ISC-123 wanted
+  origin-vs-destination version checking in the server-to-server path. Reading it from the package
+  manifest instead (ISC-141) covers the local install as well, needs no second connection, and works
+  for a Duplicator package too. The transport was the wrong layer for it.
 
 - **2026-08-28 - the Advisor raised nine risks; three were already covered, one was a real bug.**
   Checked each against the code rather than accepting the list. Already handled: `capabilities` and
@@ -461,6 +500,25 @@ to the local and push-remote scope only.
   The fix would silently neuter the flush. Left alone; documented instead.
 
 ## Changelog
+
+- **2026-08-28 — the same blind spot, in a second reader**
+  - **conjectured:** the single-quote bug was closed. `rewrite_prefix()` had been fixed and probed
+    across quoting and serialized length, and both e2e suites were green.
+  - **refuted by:** building a synthetic Fiction Drafts package and asking the existing code to read
+    it. Theme detection returned null for both template and stylesheet, and the origin URL that
+    appeared to be read from the dump had actually come from the manifest fallback with a guessed
+    scheme. `scan_dump_for_option()` carried the identical double-quote assumption AND a second one —
+    its pattern was anchored to `VALUES (`, so it only ever examined the first tuple of a statement.
+    Duplicator writes double quotes and one row per INSERT, which hid both faults completely;
+    mysqldump, `wp db export`, `migrate_app_pull` and Fiction Drafts all write single quotes and
+    extended inserts.
+  - **learned:** fixing an assumption in one place does not fix it in the others that share it. When a
+    bug turns out to be an assumption about an input format, the next move is to grep for every other
+    reader of that format rather than to close the ticket. Two readers here made the same two
+    assumptions independently, and only a genuinely different input exposed either.
+  - **criterion now:** ISC-142 and ISC-143 — an option is found anywhere in a five-row statement, in
+    either quote style, with escaped quotes and the opposite quote character inside the value; plus
+    a note in `CLAUDE.md` that any new dump parser ships with that test.
 
 - **2026-08-28 — the rewriter broke serialized data while fixing serialized data**
   - **conjectured:** the single-quote fix to `rewrite_prefix()` closed the prefix-rewriting hole. Both
@@ -623,6 +681,31 @@ php -l, and PHP 7.4 in a container  clean across migrate-app.php and src/*.php
   `the corrected payload unserializes  true`, `the UNcorrected payload would not have  false`,
   `the package folder is 0700  700`, `the dump is 0600  600`,
   `manifest records when the database was captured  1`.
+
+**Fiction Drafts interoperability — 2026-08-28**
+
+```
+php tests/probe.php                        ALL GREEN  85 passed, 0 failed, 2 skipped
+PKG=<real duplicator package> …probe.php   ALL GREEN  97 passed, 0 failed, 0 skipped
+./tests/e2e-pull.sh                        PULL E2E GREEN
+./tests/e2e-remote.sh <package>            REMOTE E2E GREEN
+```
+
+- ISC-134..141: probed against a synthetic package built from the real `Manifest::KEYS` — schema as
+  integer 1, `active_theme` as stylesheet only, an escaped-and-single-quoted dump with the
+  `SET FOREIGN_KEY_CHECKS` footer. `the format is named  'fiction-drafts'`,
+  `the ORIGIN prefix comes from the manifest  'fdw_'`, `no source path is invented from a URL  null`.
+- ISC-136: `the child theme is detected  'childish'` and `the PARENT theme is detected too  'parental'`
+  — the manifest names only the former.
+- ISC-142, ISC-143: `option 3 of 5 is found (not just the first)  'parent-theme'`, and the pattern
+  probe covers an escaped apostrophe, an embedded double quote, and an empty value.
+- Regression on the Duplicator path is the strongest evidence here: with the real package the suite
+  runs **97/97 with zero skips**, so the rewritten scanner reads the format it was originally written
+  for at least as well as before.
+
+**Not verified.** No test installs a genuine Fiction Drafts zip end to end — the probes use a synthetic
+package built to that plugin's documented manifest shape and dump format, not one produced by running
+it. Nothing exercises a real multi-volume export, and the `volumes` array is read but unused.
 
 **Not verified.** ISC-85 (two simultaneous `Ssh` instances in one process) is not exercised: the two
 legs run as separate commands, so the situation does not arise yet. ISC-102, ISC-103 and ISC-123 are

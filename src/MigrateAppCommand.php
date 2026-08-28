@@ -47,8 +47,10 @@ class MigrateAppCommand {
 	 * : Path to the migration config. Defaults to `<folder_name>/migration.yaml`.
 	 *
 	 * [--generate-config]
-	 * : Inspect the folder, write a `migration.yaml` filled in from the
-	 * Duplicator manifest, and exit without migrating anything.
+	 * : Inspect the folder, write a `migration.yaml` filled in from whatever
+	 * manifest it finds — Duplicator's `dup-archive__*.txt` or a Fiction Drafts
+	 * `manifest.json` — and exit without migrating anything. Works without a
+	 * manifest too, by scanning the dump.
 	 *
 	 * [--dry-run]
 	 * : Run every check and report every action without writing anything.
@@ -354,13 +356,22 @@ class MigrateAppCommand {
 		);
 		if ( $dup->has_manifest() ) {
 			$versions = $dup->versions();
-			$header[] = sprintf(
-				'Source: %s (Duplicator %s, WP %s, PHP %s)',
-				(string) $dup->blogname(),
-				isset( $versions['dup'] ) ? $versions['dup'] : '?',
-				isset( $versions['wp'] ) ? $versions['wp'] : '?',
-				isset( $versions['php'] ) ? $versions['php'] : '?'
-			);
+			$header[] = 'duplicator' === $dup->format()
+				? sprintf(
+					'Source: %s (Duplicator %s, WP %s, PHP %s)',
+					(string) $dup->blogname(),
+					isset( $versions['dup'] ) ? $versions['dup'] : '?',
+					isset( $versions['wp'] ) ? $versions['wp'] : '?',
+					isset( $versions['php'] ) ? $versions['php'] : '?'
+				)
+				: sprintf(
+					'Source: %s (%s export, WP %s, PHP %s, MySQL %s)',
+					(string) $dup->blogname(),
+					$dup->format_label(),
+					isset( $versions['wp'] ) ? $versions['wp'] : '?',
+					isset( $versions['php'] ) ? $versions['php'] : '?',
+					isset( $versions['db'] ) ? $versions['db'] : '?'
+				);
 		}
 		$header[] = 'table_prefix is the SOURCE prefix; this site\'s own prefix is left untouched.';
 
@@ -408,12 +419,19 @@ class MigrateAppCommand {
 		WP_CLI::log( WP_CLI::colorize( '%bPreflight%n' ) );
 
 		if ( $dup->is_multisite() ) {
-			WP_CLI::error( 'This is a multisite package. migrate_app does not migrate multisite — it would half-work, which is worse than refusing.' );
+			WP_CLI::error(
+				sprintf(
+					'This is a multisite package%s. migrate_app does not migrate multisite — it would half-work, which is worse than refusing.',
+					'' !== $dup->format_label() ? ' (' . $dup->format_label() . ' manifest says so)' : ''
+				)
+			);
 		}
 
 		if ( is_multisite() ) {
 			WP_CLI::error( 'This installation is multisite. migrate_app targets single-site installations only.' );
 		}
+
+		$this->manifest_checks( $dup );
 
 		// Database reachable.
 		$probe = $wpdb->get_var( 'SELECT 1' );
@@ -1421,6 +1439,88 @@ class MigrateAppCommand {
 	 * Print a green preflight line.
 	 *
 	 * @param string $message Text.
+	 * @return void
+	 */
+	/**
+	 * Checks that only a manifest can answer.
+	 *
+	 * A Duplicator package records versions but nothing about what was left out.
+	 * A Fiction Drafts export records both, which makes three things checkable
+	 * here that were previously only discoverable after the migration:
+	 * whether this destination is old enough to choke on the source's code,
+	 * whether the folder is carrying the origin's database credentials, and
+	 * whether the export was ever meant to be a whole site.
+	 *
+	 * All three are reported, none refuse. A deliberate `database_only` export
+	 * merged into a live site is a legitimate thing to want.
+	 *
+	 * @param Duplicator $dup Manifest reader.
+	 * @return void
+	 */
+	private function manifest_checks( Duplicator $dup ) {
+		if ( ! $dup->has_manifest() ) {
+			return;
+		}
+
+		$versions = $dup->versions();
+
+		if ( ! empty( $versions['php'] ) && version_compare( (string) $versions['php'], PHP_VERSION, '>' ) ) {
+			$this->note(
+				sprintf(
+					'The source ran PHP %s; this server runs PHP %s. Code written for the newer version can fatal here — check the site loads before deleting the package.',
+					$versions['php'],
+					PHP_VERSION
+				)
+			);
+		}
+
+		if ( ! empty( $versions['wp'] ) ) {
+			$here = (string) get_bloginfo( 'version' );
+			if ( '' !== $here && version_compare( (string) $versions['wp'], $here, '>' ) ) {
+				$this->note(
+					sprintf(
+						'The source ran WordPress %s; this site runs %s. Update this site before migrating, or the imported database may reference tables and options this version does not understand.',
+						$versions['wp'],
+						$here
+					)
+				);
+			}
+		}
+
+		if ( true === $dup->includes_wp_config() ) {
+			$this->note(
+				sprintf(
+					'The %s manifest says this export includes wp-config.php. That file holds the ORIGIN database password and all eight authentication salts. It is not merged into this site, but it is sitting in the package folder — delete the folder when you are done.',
+					$dup->format_label()
+				)
+			);
+		}
+
+		$areas = $dup->profile_areas();
+		$missing = array();
+		foreach ( array( 'database', 'uploads', 'core' ) as $area ) {
+			if ( array_key_exists( $area, $areas ) && ! $areas[ $area ] ) {
+				$missing[] = $area;
+			}
+		}
+
+		if ( $missing ) {
+			$this->note(
+				sprintf(
+					'This is a partial export — the %s manifest records no %s. That is fine if it is what you meant; it is not a whole site.',
+					$dup->format_label(),
+					implode( ' and no ', $missing )
+				)
+			);
+		}
+
+		$this->ok( sprintf( '%s manifest read', $dup->format_label() ) );
+	}
+
+	/**
+	 * Report a passing preflight check.
+	 *
+	 * @param string $message Message.
 	 * @return void
 	 */
 	private function ok( $message ) {

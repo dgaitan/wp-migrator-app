@@ -856,6 +856,12 @@ class Ssh {
 	 * Caches are regenerable by definition; carrying them costs transfer and
 	 * buys nothing.
 	 *
+	 * `fiction-drafts-*` is here for the relocated case only. By default that
+	 * plugin writes to `WP_CONTENT_DIR/fiction-drafts-<32 hex>`, a sibling of
+	 * themes, plugins and uploads, which a pull never walks — but
+	 * `FICTION_DRAFTS_STORAGE_DIR` can point it anywhere, including inside
+	 * uploads, and its archives are full site backups.
+	 *
 	 * `wp-config.php` is NOT in this list. It is excluded unconditionally at the
 	 * command layer, because it is not a size problem — it is credentials and
 	 * salts, and an exclusion the operator can switch off would be a footgun.
@@ -870,6 +876,7 @@ class Ssh {
 			'wpvividbackups',
 			'backup-*',
 			'*.wpress',
+			'fiction-drafts-*',
 			'cache',
 			'et-cache',
 			'w3tc-config',

@@ -377,10 +377,11 @@ class Fs {
 	 * half of one. This reads the tail instead, looking for the completion
 	 * marker mysqldump and mariadb-dump both write as their last line.
 	 *
-	 * Only meaningful for dumps produced by those tools. A dump assembled some
-	 * other way may legitimately lack the marker, which is why the caller uses
-	 * a byte-for-byte size comparison whenever one is available and falls back
-	 * to this only for streamed exports.
+	 * Fiction Drafts writes its own terminator instead — `SET FOREIGN_KEY_CHECKS=1;`
+	 * restoring what its header switched off — so that counts too. A dump
+	 * assembled some other way may legitimately end with neither, which is why
+	 * the caller prefers a byte-for-byte size comparison whenever one is
+	 * available and falls back to this only for streamed exports.
 	 *
 	 * @param string $path File path.
 	 * @return bool
@@ -403,7 +404,13 @@ class Fs {
 		$tail = (string) fread( $handle, $span );
 		fclose( $handle );
 
-		return false !== stripos( $tail, 'Dump completed' );
+		foreach ( array( 'Dump completed', 'SET FOREIGN_KEY_CHECKS=1' ) as $marker ) {
+			if ( false !== stripos( $tail, $marker ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**

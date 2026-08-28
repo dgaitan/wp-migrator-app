@@ -26,8 +26,9 @@ for it, and there does not need to be one.
 |---|---|
 | **`wp migrate_app_pull <folder> --from=<origin>`** | You have SSH to the source server. It brings the database and `wp-content` home and writes the manifest for you. |
 | **Unzip a Duplicator package** | You have no access to the source at all — only the export. Extract it and run `--generate-config`. See [Preparing the package](#preparing-the-package). |
+| **Unzip a [Fiction Drafts](https://github.com/dgaitan/Fiction-Drafts) export** | Same, for a site running that plugin. Its `manifest.json` is read directly. See [Fiction Drafts exports](#fiction-drafts-exports). |
 
-Both produce the same thing: a folder with a `migration.yaml`, a `.sql` dump, and `wp-content/`.
+All three produce the same thing: a folder with a `migration.yaml`, a `.sql` dump, and `wp-content/`.
 
 ### Step 2 — install that folder
 
@@ -68,6 +69,7 @@ leaves a copy of your database sitting under a live webroot.
 **Step 1 — getting the site into a folder**
 - [Preparing the package](#preparing-the-package) — from a Duplicator export
 - [Pulling a site from a server](#pulling-a-site-from-a-server) — over SSH, with `migrate_app_pull`
+- [Fiction Drafts exports](#fiction-drafts-exports) — importing what that plugin exports
 
 **Step 2 — installing the folder**
 - [Usage — the three-step flow](#usage--the-three-step-flow)
@@ -328,6 +330,72 @@ The origin is read-only in this operation. Nothing is imported and no row is wri
 
 Pull this site? [y/n]
 ```
+
+---
+
+## Fiction Drafts exports
+
+[Fiction Drafts](https://github.com/dgaitan/Fiction-Drafts) is an export-only backup plugin — its
+README says plainly that it does not restore, migrate or rewrite URLs, and never will. This tool only
+imports. They are the two halves of the same job, so an unzipped Fiction Drafts export is a first-class
+package here.
+
+```bash
+unzip fiction-drafts-backup-1.zip -d ./old-site
+wp migrate_app ./old-site --generate-config
+wp migrate_app ./old-site --dry-run
+```
+
+### What gets read
+
+An extracted export has `manifest.json` and `database.sql` at its root, with everything else relative
+to the WordPress root:
+
+```
+old-site/
+├── manifest.json
+├── database.sql
+└── wp-content/…
+```
+
+`--generate-config` reads that manifest the same way it reads Duplicator's, and fills in:
+
+| From the manifest | Into `migration.yaml` |
+|---|---|
+| `home_url` | `origin_url` (the dump is still preferred — it carries the scheme) |
+| `table_prefix` | `table_prefix` |
+| `multisite` | refuses the migration outright when true |
+| `wp_version`, `php_version`, `mysql_version` | reported, and warned about when this server is older |
+| `includes_wp_config` | warned about — see below |
+| `profile_areas` | warned about when the export is partial |
+
+The **active theme is deliberately not taken from the manifest.** Fiction Drafts records the
+stylesheet only, whereas scanning the dump recovers both the stylesheet and its template — so a child
+theme keeps its parent.
+
+### Three things worth knowing
+
+**A `full` profile is not a whole WordPress.** Fiction Drafts backs up what you asked for. Migrating a
+`database_only` or `files_no_media` export into a live site is legitimate, but it is a partial merge,
+and preflight now says so rather than letting you find out afterwards.
+
+**If the export includes `wp-config.php`, the folder holds the origin's credentials.** That is a
+per-job choice in Fiction Drafts, off by default, and the manifest records it. The file is never
+merged into your site — `migration.yaml` addresses `wp-content` paths only — but it is sitting in the
+folder. Preflight warns; delete the folder when you are done.
+
+**Version skew is reported, not enforced.** Fiction Drafts requires PHP 8.1+ and WordPress 6.4+, so a
+site running it is likely newer than an old destination. If the source ran a newer PHP than this
+server, preflight warns — migrated plugin code written for 8.1 can fatal on 7.4, which surfaces as
+[permalinks not flushing](#troubleshooting).
+
+### Pulling from a site that runs Fiction Drafts
+
+Its archives live in `wp-content/fiction-drafts-<32 hex>`, a sibling of themes, plugins and uploads —
+which `migrate_app_pull` never walks, so they are excluded by construction. If you have relocated
+storage with `FICTION_DRAFTS_STORAGE_DIR` to somewhere inside uploads, the `fiction-drafts-*` exclude
+pattern catches it there too. Either way you will not accidentally drag a pile of full-site archives
+across the wire.
 
 ---
 

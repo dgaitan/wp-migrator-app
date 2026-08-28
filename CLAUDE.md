@@ -141,6 +141,14 @@ that goes origin-to-destination directly, however convenient it looks — it nee
 a private key on the origin, it assumes two hosts can reach each other, and it destroys the on-disk
 checkpoint that makes a failed second leg cheap. See ISC-124.
 
+**Dump readers must accept BOTH quote styles, and must not assume one row per INSERT.** This has now
+bitten twice in the same codebase. `rewrite_prefix()` matched only double-quoted option names;
+`scan_dump_for_option()` matched only double quotes AND was anchored to `VALUES (`, so it saw only the
+first tuple of a statement. Duplicator writes double quotes, one row per INSERT — so both bugs were
+invisible until a mysqldump-shaped dump arrived. mysqldump, `wp db export`, `migrate_app_pull` and
+Fiction Drafts all write single quotes and extended inserts. Any new dump parser gets a test with a
+five-row single-quoted statement before it ships.
+
 **Never pull `wp-config.php`.** Not as an exclude pattern — structurally. The pull addresses
 `wp-content` subdirectories by name so the file cannot be reached. An exclusion the operator can
 switch off is a footgun; credentials and salts have no business on a laptop.
@@ -150,7 +158,8 @@ switch off is a footgun; credentials and salts have no business on a laptop.
 ```
 migrate-app.php            bootstrap; returns early unless WP_CLI is defined
 src/MigrateAppCommand.php  the sequencer — preflight, backup, import, replace, merge, finish
-src/Duplicator.php         reads dup-archive JSON + scans the dump for options
+src/Duplicator.php         package manifest reader — dup-archive JSON, Fiction Drafts manifest.json,
+                           and a dump scanner for what neither records
 src/MigrateAppRemoteCommand.php  step 2, remote — preflight, push, backup-and-pull, handoff
 src/MigrateAppPullCommand.php    step 1 — preflight, pull files then db, write the manifest
 src/Ssh.php                connection resolution, remote exec, rsync/docker push and pull

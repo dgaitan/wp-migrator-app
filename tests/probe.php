@@ -285,6 +285,141 @@ check( 'equal-length prefixes keep the same length', $same, 's:14:"xyz_user_role
 check( 'a plain quoted key is still rewritten', $rewrite_all( "('wp_user_roles','a:0:{}')" ), "('dst_user_roles','a:0:{}')" );
 
 
+echo "\n== Fiction Drafts packages are recognised (github.com/dgaitan/Fiction-Drafts) ==\n";
+
+// The shape a Fiction Drafts export actually has once unzipped: manifest.json
+// and database.sql at the root, entries relative to ABSPATH beneath. Keys and
+// values below are taken from src/Backup/Manifest.php in that plugin, not
+// invented — schema is the integer 1, active_theme is the stylesheet only, and
+// the dump is escaped-and-single-quoted with a SET FOREIGN_KEY_CHECKS footer.
+$fd = $tmp . '/fd-package';
+@mkdir( $fd . '/wp-content/themes/childish', 0777, true );
+@mkdir( $fd . '/wp-content/plugins', 0777, true );
+@mkdir( $fd . '/wp-content/uploads', 0777, true );
+
+file_put_contents(
+	$fd . '/manifest.json',
+	json_encode(
+		array(
+			'schema'             => 1,
+			'site_url'           => 'https://origin.example',
+			'home_url'           => 'https://origin.example',
+			'wp_version'         => '6.9',
+			'php_version'        => '8.3.0',
+			'mysql_version'      => '8.0.36',
+			'table_prefix'       => 'fdw_',
+			'multisite'          => false,
+			'active_theme'       => 'childish',
+			'active_plugins'     => array( 'akismet/akismet.php' ),
+			'profile'            => 'full',
+			'profile_areas'      => array( 'database' => true, 'core' => true, 'uploads' => true ),
+			'includes_wp_config' => false,
+			'file_count'         => 12,
+			'total_bytes'        => 4096,
+			'created_at'         => '2026-08-28 10:00:00',
+			'volumes'            => array(),
+		)
+	)
+);
+
+file_put_contents(
+	$fd . '/database.sql',
+	"-- Fiction Drafts export\n-- generated: 2026-08-28\nSET FOREIGN_KEY_CHECKS=0;\n"
+	. "DROP TABLE IF EXISTS `fdw_options`;\n"
+	. "CREATE TABLE `fdw_options` (`option_id` bigint, `option_name` varchar(191), `option_value` longtext);\n"
+	. "INSERT INTO `fdw_options` VALUES (1,'siteurl','https://origin.example'),(2,'home','https://origin.example'),"
+	. "(3,'template','parental'),(4,'stylesheet','childish'),(5,'fdw_user_roles','a:1:{s:13:\"administrator\";b:1;}');\n"
+	. str_repeat( "-- padding to clear the 1KB plausibility floor\n", 40 )
+	. "\nSET FOREIGN_KEY_CHECKS=1;\n"
+);
+
+$fdp = new Duplicator( $fd );
+check( 'a Fiction Drafts export is detected', $fdp->has_manifest(), true );
+check( 'the format is named', $fdp->format(), 'fiction-drafts' );
+check( 'the label is human', $fdp->format_label(), 'Fiction Drafts' );
+check( 'the ORIGIN prefix comes from the manifest', $fdp->detect_prefix(), 'fdw_' );
+check( 'the dump is found at the archive root', basename( (string) $fdp->find_database() ), 'database.sql' );
+check( 'origin URL is read from the dump', $fdp->detect_origin_url(), 'https://origin.example' );
+check( 'the manifest home_url is available too', $fdp->manifest_home_url(), 'https://origin.example' );
+check( 'multisite is read as false', $fdp->is_multisite(), false );
+check( 'wp-config.php inclusion is reported', $fdp->includes_wp_config(), false );
+
+// The stylesheet alone is what the manifest records; scanning the dump recovers
+// the parent as well, which is why theme detection is NOT taken from it.
+$themes = $fdp->detect_themes();
+check( 'the child theme is detected', $themes['stylesheet'], 'childish' );
+check( 'the PARENT theme is detected too', $themes['template'], 'parental' );
+
+$fdv = $fdp->versions();
+check( 'WordPress version is carried', isset( $fdv['wp'] ) ? $fdv['wp'] : '', '6.9' );
+check( 'PHP version is carried', isset( $fdv['php'] ) ? $fdv['php'] : '', '8.3.0' );
+check( 'MySQL version is carried', isset( $fdv['db'] ) ? $fdv['db'] : '', '8.0.36' );
+check( 'no Duplicator version is invented', isset( $fdv['dup'] ), false );
+
+// source_abspath must stay null: Fiction Drafts records no filesystem path, and
+// a URL in that slot would make the stale-path check compare a URL to a directory.
+check( 'no source path is invented from a URL', $fdp->source_abspath(), null );
+
+check( "the FD dump passes the plausibility check", Fs::looks_like_sql_dump( $fd . '/database.sql' ), true );
+check( "the FD footer counts as a complete dump", Fs::sql_dump_is_complete( $fd . '/database.sql' ), true );
+
+echo "\n== the dump scanner reads extended inserts and both quote styles ==\n";
+
+// Two bugs lived here together. The pattern was anchored to `VALUES (`, so only
+// the FIRST tuple in a statement was ever visible — invisible with Duplicator,
+// which writes one row per INSERT, and fatal with mysqldump and Fiction Drafts,
+// which write hundreds. And it hardcoded double quotes, the same blind spot the
+// prefix rewriter had.
+$scan = $tmp . '/scan';
+@mkdir( $scan, 0777, true );
+$multi = "INSERT INTO `wp_options` VALUES (1,'siteurl','https://a.example'),(2,'home','https://a.example'),"
+	. "(3,'template','parent-theme'),(4,'stylesheet','child-theme'),(5,'blogname','Dave\\'s Site');\n";
+file_put_contents( $scan . '/database.sql', "DROP TABLE IF EXISTS `wp_options`;\nCREATE TABLE `wp_options` (x int);\n" . $multi . str_repeat( "-- pad\n", 200 ) );
+file_put_contents( $scan . '/manifest.json', json_encode( array(
+	'schema' => 1, 'home_url' => 'https://a.example', 'table_prefix' => 'wp_',
+	'multisite' => false, 'profile_areas' => array( 'database' => true ),
+) ) );
+$sp = new Duplicator( $scan );
+$st = $sp->detect_themes();
+check( 'option 3 of 5 is found (not just the first)', $st['template'], 'parent-theme' );
+check( 'option 4 of 5 is found', $st['stylesheet'], 'child-theme' );
+check( 'the siteurl is read from the dump itself', $sp->detect_origin_url(), 'https://a.example' );
+
+echo "\n== a multisite Fiction Drafts export is refusable ==\n";
+$fdm = $tmp . '/fd-multisite';
+@mkdir( $fdm, 0777, true );
+file_put_contents( $fdm . '/manifest.json', json_encode( array(
+	'schema' => 1, 'home_url' => 'https://net.example', 'table_prefix' => 'wp_',
+	'multisite' => true, 'profile_areas' => array( 'database' => true ),
+) ) );
+$fdmp = new Duplicator( $fdm );
+check( 'multisite is read as true', $fdmp->is_multisite(), true );
+
+echo "\n== a partial export is reported, not silently merged ==\n";
+$fdd = $tmp . '/fd-dbonly';
+@mkdir( $fdd, 0777, true );
+file_put_contents( $fdd . '/manifest.json', json_encode( array(
+	'schema' => 1, 'home_url' => 'https://db.example', 'table_prefix' => 'wp_',
+	'multisite' => false, 'includes_wp_config' => true,
+	'profile_areas' => array( 'database' => true, 'core' => false, 'uploads' => false ),
+) ) );
+$fddp = new Duplicator( $fdd );
+$areas = $fddp->profile_areas();
+check( 'database is included', $areas['database'], true );
+check( 'uploads are not', $areas['uploads'], false );
+check( 'an included wp-config.php is flagged', $fddp->includes_wp_config(), true );
+
+echo "\n== a folder that is neither format claims neither ==\n";
+$plain = $tmp . '/plain';
+@mkdir( $plain, 0777, true );
+file_put_contents( $plain . '/manifest.json', json_encode( array( 'name' => 'some other tool', 'version' => 3 ) ) );
+$pp = new Duplicator( $plain );
+check( 'an unrelated manifest.json is ignored', $pp->has_manifest(), false );
+check( 'and reports no format', $pp->format(), '' );
+
+echo "\n== Fiction Drafts archives are excluded from a pull ==\n";
+check( 'relocated fiction-drafts storage is excluded', in_array( 'fiction-drafts-*', Ssh::content_noise(), true ), true );
+
 Fs::rmdir_recursive( $tmp );
 
 printf(
