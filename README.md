@@ -207,17 +207,18 @@ server?"* — you name it here, in WP-CLI's own alias file, `~/.wp-cli/config.ym
 
 ```yaml
 @new:
-  ssh: forge@203.0.113.10:/home/forge/example.com/public
+  ssh: deploy@example.com:22/home/deploy/public_html
   key: ~/.ssh/id_rsa
 ```
 
-Read that as `user@host:/absolute/path/to/the/wordpress/root`. The `key:` line is optional — leave it
-out if the key is already in your `ssh-agent` or `~/.ssh/config`.
+Read that as `<user>@<host>:<port>/absolute/path/to/the/wordpress/root` — substitute your own. The
+port is optional, and so is `key:`, which you can leave out if the key is already in your
+`ssh-agent` or `~/.ssh/config`.
 
 Check the connection works before going any further, with plain `ssh`:
 
 ```bash
-ssh forge@203.0.113.10 'ls /home/forge/example.com/public/wp-config.php'
+ssh deploy@example.com 'ls /home/deploy/public_html/wp-config.php'
 ```
 
 If that prints the path, you are good. If it asks for a password, stop and fix your keys — this tool
