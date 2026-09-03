@@ -57,10 +57,22 @@ class MigrateAppRemoteCommand {
 	 * : The package directory on THIS machine — the one holding `migration.yaml`
 	 * and `dup-installer/`.
 	 *
-	 * --to=<target>
+	 * [--to=<target>]
 	 * : Where to migrate to. Either a WP-CLI alias (`@prod`) or a connection
 	 * string in the same grammar `--ssh` accepts:
-	 * `[<scheme>:][<user>@]<host>[:<port>][<path>]`.
+	 * `[<scheme>:][<user>@]<host>[:<port>][<path>]`. Required for everything
+	 * except `--generate-config`, which never leaves this machine.
+	 *
+	 * [--generate-config]
+	 * : Write a `migration.yaml` into the package folder and exit. Reads only
+	 * the package, so it needs no local WordPress and no network — which is the
+	 * whole point, since the local command's `--generate-config` runs
+	 * `after_wp_load` and so cannot be reached on a machine that has no
+	 * WordPress installed. `target_url` is written EMPTY on purpose: the
+	 * destination's own `home_url()` is used at import time.
+	 *
+	 * [--force]
+	 * : With `--generate-config`, overwrite an existing `migration.yaml`.
 	 *
 	 * [--remote-path=<path>]
 	 * : Absolute path to the WordPress root on the remote. Overrides the path
@@ -123,6 +135,9 @@ class MigrateAppRemoteCommand {
 	 *
 	 * ## EXAMPLES
 	 *
+	 *     # Write the config first. No WordPress and no network needed.
+	 *     $ wp migrate_app_remote ./my_site --generate-config
+	 *
 	 *     # See what would happen, touching nothing.
 	 *     $ wp migrate_app_remote ./my_site --to=@prod --dry-run
 	 *
@@ -145,6 +160,16 @@ class MigrateAppRemoteCommand {
 	 */
 	public function __invoke( $args, $assoc_args ) {
 		$this->dry_run = (bool) Utils\get_flag_value( $assoc_args, 'dry-run', false );
+
+		/*
+		 * Generating the config comes before resolve_local(), which refuses a
+		 * folder that has no migration.yaml. That refusal is correct for a
+		 * migration and absurd for the command whose job is to create the file.
+		 */
+		if ( Utils\get_flag_value( $assoc_args, 'generate-config', false ) ) {
+			$this->generate_config( $this->resolve_package_dir( isset( $args[0] ) ? $args[0] : '' ), $assoc_args );
+			return;
+		}
 
 		$local  = $this->resolve_local( isset( $args[0] ) ? $args[0] : '' );
 		$target = (string) Utils\get_flag_value( $assoc_args, 'to', '' );
@@ -250,6 +275,35 @@ class MigrateAppRemoteCommand {
 	 * @return string Absolute path.
 	 */
 	private function resolve_local( $folder ) {
+		$path = $this->resolve_package_dir( $folder );
+
+		if ( ! is_file( $path . '/migration.yaml' ) ) {
+			WP_CLI::error(
+				sprintf(
+					"No migration.yaml in %s\n"
+						. "It has to exist here, on this machine — it travels with the package and the remote reads the uploaded copy.\n\n"
+						. "Write one now, from the package alone (no WordPress and no network needed):\n"
+						. '    wp migrate_app_remote %s --generate-config',
+					$path,
+					$folder
+				)
+			);
+		}
+
+		return $path;
+	}
+
+	/**
+	 * Resolve the package folder without requiring a config inside it.
+	 *
+	 * Split out of resolve_local() so `--generate-config` can reach a folder
+	 * that does not have a migration.yaml yet — which is every folder it is
+	 * ever pointed at.
+	 *
+	 * @param string $folder Folder as typed.
+	 * @return string Absolute path.
+	 */
+	private function resolve_package_dir( $folder ) {
 		$folder = trim( (string) $folder );
 
 		if ( '' === $folder ) {
@@ -276,23 +330,145 @@ class MigrateAppRemoteCommand {
 		}
 
 		$real = realpath( $path );
-		$path = $real ? $real : $path;
 
-		if ( ! is_file( $path . '/migration.yaml' ) ) {
+		return $real ? $real : $path;
+	}
+
+	/* ---------------------------------------------------------------------
+	 * --generate-config
+	 * ------------------------------------------------------------------ */
+
+	/**
+	 * Write a migration.yaml for a package, without WordPress and without SSH.
+	 *
+	 * This exists because the local command cannot do it here. `migrate_app` is
+	 * registered `after_wp_load`, so on a machine with no WordPress installed
+	 * WP-CLI never dispatches it at all — the operator sees a bootstrap error,
+	 * not a missing-config error, and no amount of flags gets them past it. The
+	 * documented workaround was to borrow an unrelated WordPress install with
+	 * `--path=`, which works and reads like an apology.
+	 *
+	 * It deliberately does NOT connect to the target, even though this command
+	 * has a `--to` and knows how to use it:
+	 *
+	 *   - `target_url` is written EMPTY regardless, because the importer falls
+	 *     back to the destination's own `home_url()` and a literal that goes
+	 *     stale rewrites every URL in the database to the wrong host. Reading
+	 *     the value over SSH would make it accurate today and a liability the
+	 *     day the package is installed somewhere else. Blank never goes stale.
+	 *   - Nothing else in the file describes the destination. It is entirely
+	 *     derived from the package.
+	 *
+	 * So the network buys nothing and costs the offline case. `--dry-run` is
+	 * where you go to see the far end.
+	 *
+	 * @param string $folder     Package folder on this machine.
+	 * @param array  $assoc_args Flags.
+	 * @return void
+	 */
+	private function generate_config( $folder, $assoc_args ) {
+		$path = $folder . '/migration.yaml';
+
+		if ( is_file( $path ) && ! Utils\get_flag_value( $assoc_args, 'force', false ) ) {
 			WP_CLI::error(
 				sprintf(
-					"No migration.yaml in %s\n"
-						. "It has to exist here, on this machine — it travels with the package and the remote reads the uploaded copy.\n\n"
-						. "Write one from migration.example.yaml, or let the local command fill it in from the Duplicator\n"
-						. "manifest against any working WordPress install (it only reads the package):\n"
-						. '    wp migrate_app %s --generate-config --path=/path/to/any/wordpress',
-					$path,
+					"migration.yaml already exists: %s\nRe-run with --force to overwrite it, or read it and run the migration.",
 					$path
 				)
 			);
 		}
 
-		return $path;
+		$dup      = new Duplicator( $folder );
+		$database = $dup->find_database();
+
+		if ( ! $database ) {
+			WP_CLI::error(
+				sprintf(
+					"No SQL dump found in %s\nA package needs one. Check the folder is the extracted package root.",
+					$folder
+				)
+			);
+		}
+
+		$origin = $dup->detect_origin_url( $database );
+		$themes = $dup->detect_themes( $database );
+		$prefix = $dup->detect_prefix( $database );
+
+		$facts = array(
+			'origin_url' => $origin ? $origin : '',
+			// Empty on purpose. See the docblock.
+			'target_url' => '',
+			'template'   => $themes['template'],
+			'stylesheet' => $themes['stylesheet'],
+			'database'   => $database,
+			'prefix'     => $prefix ? $prefix : '',
+		);
+
+		$header = array(
+			'migration.yaml — generated by `wp migrate_app_remote --generate-config`',
+			'Read every line before running the migration. Paths are relative to this folder.',
+			'',
+			'target_url is EMPTY on purpose: the remote uses its own home_url() at import',
+			'time. Set it only to send the site somewhere other than where it is installed.',
+			'table_prefix is the SOURCE prefix; the destination keeps its own.',
+		);
+
+		if ( $dup->has_manifest() ) {
+			$versions = $dup->versions();
+			$header[] = '';
+			$header[] = sprintf(
+				'Source: %s (%s, WP %s, PHP %s)',
+				(string) $dup->blogname(),
+				$dup->format_label(),
+				isset( $versions['wp'] ) ? $versions['wp'] : '?',
+				isset( $versions['php'] ) ? $versions['php'] : '?'
+			);
+		}
+
+		if ( ConfigFile::is_nested( $themes['template'], $themes['stylesheet'] ) ) {
+			$header[] = '';
+			$header[] = sprintf(
+				'The origin runs its active theme from a SUBDIRECTORY of the themes root (%s),',
+				(string) $themes['stylesheet']
+			);
+			$header[] = 'so theme_path is the container. Naming the theme directly would flatten the';
+			$header[] = 'nesting on the destination and the database would point at a path not there.';
+		}
+
+		$yaml = ConfigFile::render( $folder, $facts, $header );
+
+		if ( $this->dry_run ) {
+			WP_CLI::log( "\n" . $yaml );
+			WP_CLI::success( sprintf( '--dry-run: would write %s', $path ) );
+			return;
+		}
+
+		if ( false === file_put_contents( $path, $yaml ) ) {
+			WP_CLI::error( sprintf( 'Could not write %s', $path ) );
+		}
+
+		WP_CLI::log( "\n" . $yaml );
+
+		if ( ! $origin ) {
+			WP_CLI::warning( 'origin_url could not be detected. Set it by hand — the migration will refuse to run without it.' );
+		}
+
+		if ( ConfigFile::is_nested( $themes['template'], $themes['stylesheet'] ) ) {
+			WP_CLI::warning(
+				sprintf(
+					'Active theme is nested (%s), so theme_path is the whole themes container. That is correct — see the comment in the file.',
+					(string) $themes['stylesheet']
+				)
+			);
+		}
+
+		WP_CLI::success(
+			sprintf(
+				"Wrote %s\nRead it, then: wp migrate_app_remote %s --to=<target> --dry-run",
+				$path,
+				basename( $folder )
+			)
+		);
 	}
 
 	/**

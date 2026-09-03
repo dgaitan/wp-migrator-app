@@ -18,11 +18,13 @@
 $base = dirname( __DIR__ );
 require_once $base . '/src/Yaml.php';
 require_once $base . '/src/Fs.php';
+require_once $base . '/src/ConfigFile.php';
 require_once $base . '/src/Duplicator.php';
 require_once $base . '/src/Ssh.php';
 
 use MigrateApp\Yaml;
 use MigrateApp\Fs;
+use MigrateApp\ConfigFile;
 use MigrateApp\Duplicator;
 use MigrateApp\Ssh;
 
@@ -130,6 +132,89 @@ if ( ! $pkg || ! is_dir( $pkg ) ) {
 	check( 'round-trip database', $back['database'], $data['database'] );
 	check( 'round-trip prefix', $back['table_prefix'], $data['table_prefix'] );
 }
+
+echo "\n== ConfigFile: theme paths that survive the merge ==\n";
+$cf = sys_get_temp_dir() . '/migrate-app-configfile-' . getmypid();
+@mkdir( $cf . '/wp-content/themes/parent', 0777, true );
+@mkdir( $cf . '/wp-content/themes/child', 0777, true );
+@mkdir( $cf . '/wp-content/themes/themes/rem', 0777, true );
+@mkdir( $cf . '/wp-content/plugins', 0777, true );
+@mkdir( $cf . '/wp-content/uploads', 0777, true );
+file_put_contents( $cf . '/database.sql', "-- MySQL dump\nCREATE TABLE `wp_options` (id int);\n" );
+
+check( 'a single theme resolves to its own directory', ConfigFile::theme_paths( $cf, 'parent', 'parent' ), array( 'wp-content/themes/parent' ) );
+check( 'a child theme brings the parent along', ConfigFile::theme_paths( $cf, 'parent', 'child' ), array( 'wp-content/themes/parent', 'wp-content/themes/child' ) );
+check( 'a theme absent from the package falls back to the container', ConfigFile::theme_paths( $cf, 'ghost', 'ghost' ), array( 'wp-content/themes' ) );
+
+/*
+ * The regression this class was extracted for. `template` = `themes/rem` is a
+ * theme in a SUBDIRECTORY of the themes root, which WordPress supports. Naming
+ * it directly makes merge_into() flatten it to wp-content/themes/rem via
+ * basename(), where a different theme of that name may already sit — so the
+ * container is the only correct answer.
+ */
+check( 'a nested active theme is detected', ConfigFile::is_nested( 'themes/rem', 'themes/rem' ), true );
+check( 'a normal active theme is not', ConfigFile::is_nested( 'rem', 'rem' ), false );
+check( 'a nested active theme forces the container', ConfigFile::theme_paths( $cf, 'themes/rem', 'themes/rem' ), array( 'wp-content/themes' ) );
+check( 'and never names the nested directory itself', in_array( 'wp-content/themes/themes/rem', ConfigFile::theme_paths( $cf, 'themes/rem', 'themes/rem' ), true ), false );
+
+echo "\n== ConfigFile: the built map ==\n";
+$built = ConfigFile::build(
+	$cf,
+	array(
+		'origin_url' => 'http://old-site.test',
+		'target_url' => '',
+		'template'   => 'parent',
+		'stylesheet' => 'parent',
+		'database'   => $cf . '/database.sql',
+		'prefix'     => 'wp_',
+	)
+);
+check( 'origin_url is carried through', $built['origin_url'], 'http://old-site.test' );
+check( 'target_url stays empty for the remote fallback', $built['target_url'], '' );
+check( 'a single theme collapses to a scalar', $built['theme_path'], 'wp-content/themes/parent' );
+check( 'plugins are detected', $built['plugin_path'], 'wp-content/plugins' );
+check( 'uploads are detected', $built['uploads_path'], 'wp-content/uploads' );
+check( 'the dump path is made relative to the folder', $built['database'], 'database.sql' );
+check( 'table_prefix is the source prefix', $built['table_prefix'], 'wp_' );
+
+$absent = ConfigFile::build( $cf . '/wp-content', array( 'origin_url' => 'x', 'database' => '' ) );
+check( 'a missing uploads directory yields an empty value', $absent['uploads_path'], '' );
+check( 'an empty dump path stays empty', $absent['database'], '' );
+
+echo "\n== ConfigFile: rendered output round-trips ==\n";
+$rendered = ConfigFile::render(
+	$cf,
+	array(
+		'origin_url' => 'http://old-site.test',
+		'target_url' => '',
+		'template'   => 'parent',
+		'stylesheet' => 'child',
+		'database'   => $cf . '/database.sql',
+		'prefix'     => 'wp_',
+	),
+	array( 'a header line' )
+);
+$parsed = Yaml::parse_builtin( $rendered );
+check( 'round-trip origin_url', $parsed['origin_url'], 'http://old-site.test' );
+check( 'round-trip theme list', $parsed['theme_path'], array( 'wp-content/themes/parent', 'wp-content/themes/child' ) );
+check( 'round-trip database', $parsed['database'], 'database.sql' );
+check( 'round-trip prefix', $parsed['table_prefix'], 'wp_' );
+
+/*
+ * An empty target_url must render as a bare `target_url:`. That is the form
+ * migrate_app_pull has always written and the form tests/e2e-pull.sh asserts,
+ * and it has to parse back to '' so load_config() takes the home_url()
+ * fallback rather than rewriting every URL to the literal string.
+ */
+check( 'an empty target_url renders bare, not as ""', (bool) preg_match( '/^target_url:$/m', $rendered ), true );
+// The built-in parser gives a bare key null, and load_config() casts through
+// normalize_url() before testing it — so null and '' are the same thing here.
+// Assert the contract that actually holds rather than the representation.
+check( 'and parses back to an empty value', (string) $parsed['target_url'], '' );
+check( 'the header is emitted as a comment', (bool) preg_match( '/^# a header line$/m', $rendered ), true );
+
+Fs::rmdir_recursive( $cf );
 
 echo "\n== backup plausibility: a truncated dump must not pass ==\n";
 $bk = sys_get_temp_dir() . '/migrate-app-backup-probe-' . getmypid();

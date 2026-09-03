@@ -45,6 +45,7 @@ $migrate_app_src = __DIR__ . '/src';
 $migrate_app_classes = array(
 	'Yaml'                     => 'Yaml.php',
 	'Fs'                       => 'Fs.php',
+	'ConfigFile'               => 'ConfigFile.php',
 	'Ssh'                      => 'Ssh.php',
 	'Duplicator'               => 'Duplicator.php',
 	'MigrateAppCommand'        => 'MigrateAppCommand.php',

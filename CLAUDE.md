@@ -163,6 +163,8 @@ src/Duplicator.php         package manifest reader — dup-archive JSON, Fiction
 src/MigrateAppRemoteCommand.php  step 2, remote — preflight, push, backup-and-pull, handoff
 src/MigrateAppPullCommand.php    step 1 — preflight, pull files then db, write the manifest
 src/Ssh.php                connection resolution, remote exec, rsync/docker push and pull
+src/ConfigFile.php         shared migration.yaml derivation — theme cardinality, path detection,
+                           rendering. The one place all three commands write the file from
 src/Fs.php                 path resolution, additive merge, theme/plugin cardinality
 src/Yaml.php               three-tier YAML loader + dumper
 tests/probe.php            unit harness

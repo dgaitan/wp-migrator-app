@@ -25,7 +25,7 @@ for it, and there does not need to be one.
 | | |
 |---|---|
 | **`wp migrate_app_pull <folder> --from=<origin>`** | You have SSH to the source server. It brings the database and `wp-content` home and writes the manifest for you. |
-| **Unzip a Duplicator package** | You have no access to the source at all — only the export. Extract it and run `--generate-config`. See [Preparing the package](#preparing-the-package). |
+| **Unzip a Duplicator package** | You have no access to the source at all — only the export. Extract it and run `--generate-config`. See [Preparing the package](#preparing-the-package). On a machine with no WordPress of its own, that is `wp migrate_app_remote <folder> --generate-config`. |
 | **Unzip a [Fiction Drafts](https://github.com/dgaitan/Fiction-Drafts) export** | Same, for a site running that plugin. Its `manifest.json` is read directly. See [Fiction Drafts exports](#fiction-drafts-exports). |
 
 All three produce the same thing: a folder with a `migration.yaml`, a `.sql` dump, and `wp-content/`.
@@ -61,10 +61,13 @@ leaves a copy of your database sitting under a live webroot.
 
 ## Contents
 
-**Start here**
+**Start here — read this and nothing else on your first run**
+- [**Two scenarios, start to finish**](#two-scenarios-start-to-finish) — install, then a complete
+  walkthrough for each of the two situations you can be in
+  - [Scenario A — importing into WordPress on this machine](#scenario-a--importing-into-wordpress-on-this-machine)
+  - [Scenario B — importing into WordPress on another server](#scenario-b--importing-into-wordpress-on-another-server)
 - [Requirements](#requirements)
 - [Install](#install)
-- [Preparing the package](#preparing-the-package)
 
 **Step 1 — getting the site into a folder**
 - [Preparing the package](#preparing-the-package) — from a Duplicator export
@@ -91,6 +94,208 @@ leaves a copy of your database sitting under a live webroot.
 **Other**
 - [Using it without Duplicator](#using-it-without-duplicator)
 - [Development and testing](#development-and-testing)
+
+---
+
+## Two scenarios, start to finish
+
+Almost everything in this README is detail on one of these two. **Find the one that matches where you
+are sitting, follow it top to bottom, and ignore the other.**
+
+|  | **A — the destination is this machine** | **B — the destination is another server** |
+|---|---|---|
+| Where you type the commands | on the destination itself | on your own machine |
+| Is WordPress installed where you type? | **yes** — that is the site being migrated into | **no** — and it does not need to be |
+| Command you use | `wp migrate_app` | `wp migrate_app_remote` |
+| How the package gets there | you put it there (SFTP, File Manager, git) | the command uploads it over rsync |
+| Do you need SSH? | no | yes, key-based |
+| Where the safety backup lands | on the destination | **on your machine**, before anything is touched |
+
+If you can SSH to the destination, prefer **B** even when A is possible. Fewer manual steps, the
+backup comes home before the risky part, and the package never sits under a live webroot.
+
+---
+
+### Before either scenario: install the tool
+
+Pick whichever fits the machine you will be typing on. For **A** that is the destination server; for
+**B** it is your own machine.
+
+```bash
+# Best default — makes `wp migrate_app` available everywhere on that machine.
+wp package install /path/to/wp-cli-migrate-app
+```
+
+```bash
+# No install — point at the bootstrap each time. Handy on a host you just uploaded to.
+wp --require=/path/to/wp-cli-migrate-app/migrate-app.php migrate_app ./my-site
+```
+
+Confirm it is there before going further:
+
+```bash
+wp help migrate_app          # scenario A
+wp help migrate_app_remote   # scenario B
+```
+
+Full details, including the plugin-folder route: [Install](#install).
+
+---
+
+### Scenario A — importing into WordPress on this machine
+
+**You are on the destination server.** WordPress is installed and working there, and you want the old
+site merged into it.
+
+**1. Put the package folder in the WordPress root**, next to `wp-admin/`. However you like — SFTP,
+File Manager, `unzip`. You should end up with:
+
+```
+/var/www/html/            ← the working WordPress
+├── wp-admin/
+├── wp-content/
+├── wp-config.php
+└── my-site/              ← the package you just put there
+    ├── database.sql
+    └── wp-content/
+```
+
+**2. Write the config:**
+
+```bash
+cd /var/www/html
+wp migrate_app ./my-site --generate-config
+```
+
+This reads the package and writes `my-site/migration.yaml`. Because WordPress is loaded around it, it
+fills `target_url` with **this site's own URL**.
+
+**3. Read the file it wrote.** Genuinely read it — it is seven lines and it decides what happens:
+
+```bash
+cat my-site/migration.yaml
+```
+
+**4. Rehearse. Nothing is written:**
+
+```bash
+wp migrate_app ./my-site --dry-run
+```
+
+**5. Do it:**
+
+```bash
+wp migrate_app ./my-site --yes
+```
+
+A backup is exported first, to the WordPress root. **6.** Then delete the package folder — it is
+sitting in your webroot where the internet can read it:
+
+```bash
+rm -rf my-site   # or run step 5 with --cleanup
+```
+
+---
+
+### Scenario B — importing into WordPress on another server
+
+**You are on your own machine.** It does **not** need WordPress, PHP-with-a-database, or anything but
+WP-CLI, `rsync` and an SSH key. The destination has the WordPress.
+
+**1. Tell WP-CLI about the server, once.** This is the step that answers *"how does it know the
+server?"* — you name it here, in WP-CLI's own alias file, `~/.wp-cli/config.yml`:
+
+```yaml
+@new:
+  ssh: forge@203.0.113.10:/home/forge/example.com/public
+  key: ~/.ssh/id_rsa
+```
+
+Read that as `user@host:/absolute/path/to/the/wordpress/root`. The `key:` line is optional — leave it
+out if the key is already in your `ssh-agent` or `~/.ssh/config`.
+
+Check the connection works before going any further, with plain `ssh`:
+
+```bash
+ssh forge@203.0.113.10 'ls /home/forge/example.com/public/wp-config.php'
+```
+
+If that prints the path, you are good. If it asks for a password, stop and fix your keys — this tool
+will not accept one.
+
+> Do not test with `wp --ssh=@new`. It looks equivalent and is not: WP-CLI's own `--ssh` resolves
+> aliases differently and may fail on an alias this tool reads perfectly well. `--to=@new` is what
+> matters here, and step 5's `--dry-run` is the real test of it.
+
+**2. Have the package folder anywhere on your machine.** Any folder, not a webroot:
+
+```
+~/Sites/my-site/
+├── database.sql
+└── wp-content/
+```
+
+**3. Write the config — no server involved yet:**
+
+```bash
+wp migrate_app_remote ./my-site --generate-config
+```
+
+Note there is **no `--to`** here, and that is not an oversight. This step only reads the package on
+your disk. The file it writes describes the *source site* — its old URL, its table prefix, which
+folders to bring — and contains nothing at all about the destination. So there is no server for it to
+know about yet.
+
+`target_url` is left **empty** on purpose, and that is the piece worth understanding: at import time
+the destination fills in its own URL, read live from the far end. That is why the same package can be
+installed anywhere without editing it, and why a hardcoded value would be a bug waiting to happen.
+
+**4. Read the file it wrote:**
+
+```bash
+cat my-site/migration.yaml
+```
+
+**5. Now bring in the server. Rehearse first** — this connects, checks the far end and reports, but
+transfers nothing and changes nothing:
+
+```bash
+wp migrate_app_remote ./my-site --to=@new --dry-run
+```
+
+Read the summary it prints. It resolves `@new` to a real host, path and home URL — check they are the
+ones you meant.
+
+**6. Do it:**
+
+```bash
+wp migrate_app_remote ./my-site --to=@new
+```
+
+It uploads to a staging directory **outside** the webroot, takes a database backup and pulls it home
+to your machine *before* anything destructive, then runs the import on the far end.
+
+**7. Remove the staging copy** once you are happy — it holds a dump of the old database:
+
+```bash
+wp migrate_app_remote ./my-site --to=@new --cleanup-only
+```
+
+---
+
+### The one thing that trips people up
+
+`migration.yaml` describes the **package**, never the destination.
+
+```
+generate-config  ──reads──>  the folder on your disk        (no server, no --to)
+                 ──writes─>  migration.yaml
+
+the migration    ──reads──>  migration.yaml  +  --to=@new   (server named here)
+```
+
+That separation is why step 3 needs no `--to` and step 6 does. It is also why one package folder can
+be installed on staging, then on production, with no edits in between.
 
 ---
 
@@ -346,6 +551,14 @@ wp migrate_app ./old-site --generate-config
 wp migrate_app ./old-site --dry-run
 ```
 
+Migrating to a remote server from a machine with no WordPress on it? Generate the config with the
+remote command instead — same derivation, no bootstrap:
+
+```bash
+wp migrate_app_remote ./old-site --generate-config
+wp migrate_app_remote ./old-site --to=@prod --dry-run
+```
+
 ### What gets read
 
 An extracted export has `manifest.json` and `database.sql` at its root, with everything else relative
@@ -418,6 +631,11 @@ if the source runs a child theme.
 
 **Read the file it wrote.** Fix anything it guessed wrong. In particular check `target_url`, which
 defaults to this site's current `home_url()`.
+
+> This form needs a working WordPress around it — `migrate_app` is registered `after_wp_load`, so on a
+> machine that has none, WP-CLI never dispatches it and you get a bootstrap error. Use
+> `wp migrate_app_remote my_site_to_migrated --generate-config` there; it derives the same file from
+> the package alone and leaves `target_url` empty for the destination to fill.
 
 ### 2. Dry run
 
@@ -629,13 +847,29 @@ Three consequences worth knowing:
 remote path, or one relative to the remote WordPress root. It is not resolved against your machine
 or against the staged package.
 
-There is no `--generate-config` on the remote command yet. Write the file from
-[migration.example.yaml](migration.example.yaml), or let the local command fill it in from the
-Duplicator manifest against any working WordPress install — it only reads the package:
+`migrate_app_remote` has its own `--generate-config`, and on an operator's machine it is the one you
+want:
 
 ```bash
-wp migrate_app ./my_site_to_migrated --generate-config --path=/path/to/any/wordpress
+wp migrate_app_remote ./my_site_to_migrated --generate-config
 ```
+
+It reads the package and nothing else — **no local WordPress, no network, and `--to` is not
+required.** That matters because the local command cannot do this job here. `migrate_app` is
+registered `after_wp_load`, so on a machine with no WordPress installed WP-CLI never dispatches it;
+you get a bootstrap error rather than a config, and no combination of flags gets you past it. The old
+advice was to borrow an unrelated install with `--path=/path/to/any/wordpress`, which works and reads
+like an apology.
+
+`target_url` is written **empty**, which is what remote mode wants anyway — the destination's own
+`home_url()` is used at import time, so the file cannot go stale by naming a host it later stops
+being installed on. That is also why the command does not SSH anywhere to fill it in: an accurate
+value today is a liability the day the package is installed somewhere else.
+
+It refuses to overwrite an existing `migration.yaml` unless you pass `--force`, and `--dry-run`
+prints the file it would write without creating it.
+
+You can still write the file by hand from [migration.example.yaml](migration.example.yaml).
 
 ### What the run shows you
 
@@ -740,7 +974,9 @@ through. These are the ones remote mode adds:
 
 | flag | effect |
 |---|---|
-| `--to=<target>` | **Required.** Alias (`@prod`) or connection string. |
+| `--to=<target>` | **Required**, except with `--generate-config`. Alias (`@prod`) or connection string. |
+| `--generate-config` | Write `migration.yaml` from the package and exit. No WordPress, no network. |
+| `--force` | With `--generate-config`, overwrite an existing `migration.yaml`. |
 | `--remote-path=<path>` | WordPress root on the remote, if not in the connection string. |
 | `--identity=<file>` | SSH key. Defaults to `ssh-agent` / `~/.ssh/config`. |
 | `--proxyjump=<spec>` | Passed to ssh as `-J`. |
@@ -973,6 +1209,17 @@ renders the site unstyled.
 `Plugin Name:` header and no plugin subdirectories is one plugin. Anything else is treated as a
 container and each child is merged individually — which is what leaves the destination's own themes
 and plugins alone.
+
+**Nested themes:** WordPress lets a theme live one level deeper — `search_theme_directories()`
+descends a second level past a directory with no `style.css`, and records the theme as
+`subdir/theme`. So `stylesheet` can legitimately read `themes/rem`, meaning
+`wp-content/themes/themes/rem`. When `--generate-config` sees that, it writes the **container**
+(`theme_path: wp-content/themes`) rather than the theme's own path, and says so in a comment. This is
+not the generator giving up: a single theme is placed at `themes/` + `basename()`, which flattens
+`themes/rem` to `rem` — where a *different* theme of that name may already be sitting, so the site
+either renders unstyled or silently loads the wrong code. The container is the only form that
+preserves the nesting. If you hit this, it is usually a leftover from an earlier botched migration on
+the source; worth cleaning up there rather than carrying it forward.
 
 ---
 

@@ -310,6 +310,19 @@ to the local and push-remote scope only.
 
 
 
+### Config generation without WordPress (added 2026-09-03)
+
+- [x] ISC-147: `migrate_app_remote --generate-config` writes a `migration.yaml` from the package alone
+- [x] ISC-148: it requires no WordPress on the operator's machine — the local command cannot, being `after_wp_load`
+- [x] ISC-149: it requires no network, and `--to=` is optional in this mode
+- [x] ISC-150: generated `target_url` is empty, so the destination's own `home_url()` is used at import
+- [x] ISC-151: Anti: it refuses to overwrite an existing `migration.yaml` without `--force`
+- [x] ISC-152: `--dry-run` prints the file and writes nothing
+- [x] ISC-153: Anti: a package with no dump is refused by name, not by writing a config with an empty `database`
+- [x] ISC-154: all three writers derive the file through one `ConfigFile`, so there is no fourth format to drift
+- [x] ISC-155: a nested active theme (`stylesheet` containing `/`) yields the themes **container**, never the theme's own path
+- [x] ISC-156: the nested case is explained in the generated file and as a `WARN`, so the container does not read as a detection failure
+
 ## Test Strategy
 
 | isc | type | check | threshold | tool |
@@ -349,6 +362,39 @@ to the local and push-remote scope only.
 | server-to-server | compose pull + existing `migrate_app_remote`; docs and e2e only | ISC-110..113 | pull-safety | no |
 
 ## Decisions
+
+- **2026-09-03 - `--generate-config` belongs on the remote command, and must not phone home.**
+  Reported from the field: on a machine with no WordPress there is no way to produce a
+  `migration.yaml`, because `migrate_app` is registered `after_wp_load` and WP-CLI therefore never
+  dispatches it — the operator sees a bootstrap error, not a missing-config error. The documented
+  workaround (`--path=/path/to/any/wordpress`, borrowing an unrelated install) works and reads like an
+  apology. `migrate_app_remote` is already `before_wp_load` and is already the command you run on a
+  laptop, so it is the right host. It deliberately does **not** SSH to fill in `target_url`, even
+  though it has a `--to` and knows how to use it: the value is written empty regardless, because the
+  importer falls back to the destination's own `home_url()` and a literal that goes stale rewrites
+  every URL in the database to the wrong host. Reading it over SSH would make it accurate today and a
+  liability the day the package is installed somewhere else. Nothing else in the file describes the
+  destination, so the network buys nothing and costs the offline case. ISC-147..153.
+
+- **2026-09-03 - the third writer forced the extraction that should have happened at the second.**
+  `MigrateAppCommand::generate_config()` and `MigrateAppPullCommand::write_manifest()` had already
+  drifted — one rendered through `Yaml::dump()`, the other hand-built its lines — and both carried the
+  same theme bug. Adding a third copy would have violated the standing invariant directly, so the
+  shared tail moved to `src/ConfigFile.php`: theme cardinality, `wp-content` detection, and rendering.
+  It depends on neither WordPress nor WP-CLI, which is what lets `tests/probe.php` cover it with no
+  bootstrap. `Yaml::dump()` now emits a bare `key:` for an empty scalar, matching the form the pull
+  command has always written and `tests/e2e-pull.sh` asserts. ISC-154.
+
+- **2026-09-03 - a nested active theme must generate the container, not the theme.** WordPress
+  supports a theme one level below the themes root: `search_theme_directories()` descends past a
+  directory with no `style.css` and records the theme as `subdir/theme`, so `stylesheet` can read
+  `themes/rem`. Every generator wrote that straight through as
+  `theme_path: wp-content/themes/themes/rem`, and `merge_into()` places a single theme at `themes/` .
+  `basename( $src )` — flattening it to `wp-content/themes/rem`, which the database does not point at
+  and where a *different* theme of the same basename may already sit. Found on a real package where
+  both copies existed and differed. The container is the only form `merge_into()` preserves, so a
+  nested slug now forces it, with the reason written into the file and repeated as a `WARN` — a
+  container that appears without explanation reads as the detector having failed. ISC-155, ISC-156.
 
 - **2026-08-28 - Fiction Drafts is read by `Duplicator`, not by a new class.** Fiction Drafts
   (github.com/dgaitan/Fiction-Drafts) is an export-only backup plugin whose README states it will never
@@ -649,6 +695,39 @@ to the local and push-remote scope only.
   remote path is tested over a real sshd, with the docker transport kept as a second pass.
 
 ## Verification
+
+**Config generation without WordPress — 2026-09-03**
+
+```
+php tests/probe.php                   ALL GREEN  108 passed, 0 failed, 2 skipped
+PKG=<fiction-drafts pkg> probe.php    119 passed, 1 failed  (pre-existing: `admin users found`
+                                      asserts a Duplicator-only `adminUsers` key; identical on
+                                      clean HEAD at 96 passed, 1 failed)
+./tests/e2e.sh <duplicator pkg>       E2E GREEN         9/9
+./tests/e2e-pull.sh <duplicator pkg>  PULL E2E GREEN    50/50
+./tests/e2e-remote.sh <duplicator pkg> 30 passed, 2 failed — byte-identical to clean HEAD on the
+                                      same fixture, so not a regression from this change
+php -l under PHP 7.4 in a container   clean across migrate-app.php, src/*.php, tests/probe.php
+```
+
+- ISC-147..150, 152: run against a real Fiction Drafts package on a machine with no WordPress:
+  `wp migrate_app_remote ./rem --generate-config` with **no `--to`** wrote a config whose seven values
+  are identical to one derived by hand from the manifest and the dump. `--dry-run` printed the same
+  file and left the folder without one.
+- ISC-151: `Error: migration.yaml already exists: ... Re-run with --force to overwrite it.`
+- ISC-154: `tests/e2e-pull.sh` still asserts `target_url is deliberately empty  1` and
+  `theme_path points at the active theme  wp-content/themes/origin-theme` after the pull command was
+  moved onto `ConfigFile::theme_paths()` — the shared resolver is behaviour-preserving for the
+  ordinary case, which is the only claim that refactor makes.
+- ISC-155, ISC-156: probed directly, no bootstrap —
+  `a nested active theme forces the container  ["wp-content/themes"]` and
+  `and never names the nested directory itself  false`. On the real package, where the origin's
+  `stylesheet` is literally `themes/rem`, the command wrote `theme_path: wp-content/themes` and
+  warned why.
+- The two e2e rigs stage only `dup-installer/` and `wp-content/`, so a Fiction Drafts package — whose
+  dump sits at the archive root — stages with no dump at all and fails at `origin_url is required`.
+  Confirmed pre-existing on clean HEAD. A Duplicator-shaped fixture was built to exercise them.
+  Worth fixing in the rigs: they no longer cover every package format the tool claims to read.
 
 **Pull mode and server-to-server — 2026-08-28**
 

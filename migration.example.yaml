@@ -6,6 +6,11 @@
 # You do not have to write this by hand — run:
 #     wp migrate_app my_site_to_migrated --generate-config
 # and it will read the Duplicator manifest and fill in everything it can.
+#
+# On a machine with no WordPress of its own (migrating to a remote), use:
+#     wp migrate_app_remote my_site_to_migrated --generate-config
+# Same derivation, no bootstrap and no network, and it leaves target_url empty
+# so the destination's own home_url() is used.
 
 # The URL the source site used to live at. Found in the dump's `siteurl` option.
 origin_url: https://old-site.com

@@ -235,6 +235,19 @@ class Yaml {
 				$out .= $key . ': ~' . "\n";
 				continue;
 			}
+			/*
+			 * An empty scalar is written as a bare `key:` rather than `key: ""`.
+			 * Both parse back to '', but `target_url:` is the form
+			 * `migrate_app_pull` has always emitted and the form its e2e
+			 * asserts, and an operator reading the file sees "nothing here"
+			 * rather than "the empty string, deliberately". Emitted here rather
+			 * than in quote(), which also renders list items where a bare `-`
+			 * would be wrong.
+			 */
+			if ( '' === (string) $value ) {
+				$out .= $key . ':' . "\n";
+				continue;
+			}
 			$out .= $key . ': ' . self::quote( (string) $value ) . "\n";
 		}
 
